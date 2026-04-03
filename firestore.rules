@@ -1,0 +1,180 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isResourceOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isUserDocOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Admin: user document has isAdmin == true (set via helper / console).
+    function isAdmin() {
+      return isSignedIn()
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.isAdmin == true;
+    }
+
+    // ─── USERS ─────────────────────────────────────────────────────────
+    // User can read/write only their own document. Must be authenticated.
+    // App may write: dailyUsedCount, dailyResetDate, planType, trialStartDate, trialEndDate, trialExpired, premiumExpiry, premiumStartDate (auth + monetization + IAP).
+    // Server-only legacy: dailyAiUsed, dailyAiDate, totalAiUsed.
+    function serverOnlyKeysUnchanged() {
+      return !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+        'dailyAiUsed', 'dailyAiDate', 'totalAiUsed'
+      ]);
+    }
+    match /users/{userId} {
+      allow get: if isSignedIn() && (request.auth.uid == userId || isAdmin());
+      allow list: if isAdmin();
+      allow create: if isUserDocOwner(userId);
+      allow update: if (isUserDocOwner(userId) && serverOnlyKeysUnchanged()) || isAdmin();
+      allow delete: if false;
+
+      match /devices/{deviceId} {
+        allow read, write: if isResourceOwner(userId);
+      }
+
+      match /notifications/{notificationId} {
+        allow read, write: if request.auth != null
+                            && request.auth.uid == userId;
+      }
+
+      match /tool_usage/{toolId} {
+        allow create: if isSignedIn()
+          && request.auth.uid == userId;
+        allow read: if isSignedIn()
+          && request.auth.uid == userId;
+        allow update: if isSignedIn()
+          && request.auth.uid == userId;
+        allow delete: if isSignedIn()
+          && request.auth.uid == userId;
+      }
+    }
+
+    // ─── FEEDBACK ───────────────────────────────────────────────────────
+    // Any authenticated user can CREATE. User can READ only own (userId == auth.uid).
+    // Admin can read/update/delete ALL feedback.
+    match /feedback/{feedbackId} {
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid;
+      allow read: if isSignedIn()
+        && (resource.data.userId == request.auth.uid || isAdmin());
+      allow update, delete: if isAdmin();
+    }
+
+    // ─── ANALYTICS ──────────────────────────────────────────────────────
+    // App can write analytics documents if authenticated. Only admin can read.
+    match /analytics/{document=**} {
+      allow read: if isAdmin();
+      allow write: if isSignedIn();
+    }
+
+    match /posts/{postId} {
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid;
+
+      allow read: if isSignedIn()
+        && resource.data.userId == request.auth.uid;
+
+      allow update, delete: if isSignedIn()
+        && request.auth.uid == resource.data.userId;
+    }
+
+    match /instagram_users/{userId} {
+      allow get, list: if isResourceOwner(userId);
+      allow create, update, delete: if isResourceOwner(userId);
+    }
+
+    match /instagram_oauth_states/{stateId} {
+      allow read, write: if false;
+    }
+
+    match /notifications/{userId}/items/{notificationId} {
+      allow read, write: if isResourceOwner(userId);
+    }
+
+    match /calendar_history/{calendarId} {
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid;
+
+      allow read: if isSignedIn()
+        && resource.data.userId == request.auth.uid;
+
+      allow update, delete: if isSignedIn()
+        && request.auth.uid == resource.data.userId;
+    }
+
+    match /script_history/{scriptId} {
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid;
+
+      allow read: if isSignedIn()
+        && resource.data.userId == request.auth.uid;
+
+      allow update, delete: if isSignedIn()
+        && request.auth.uid == resource.data.userId;
+    }
+
+    match /ai_history/{historyId} {
+      allow create: if isSignedIn()
+        && request.resource.data.userId == request.auth.uid;
+
+      allow read: if isSignedIn()
+        && resource.data.userId == request.auth.uid;
+
+      allow update, delete: if isSignedIn()
+        && request.auth.uid == resource.data.userId;
+    }
+
+    // ─── AI USAGE LOGS (admin analytics) ─────────────────────────────────
+    // App writes on each AI use (uid, email, usedAt, toolName). Only admin can read.
+    match /ai_usage_logs/{logId} {
+      allow create: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid;
+      allow read: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    // ─── REFUND LOGS (subscription revoke audit) ─────────────────────────
+    // Written only by Cloud Functions (Admin SDK). Admins can read.
+    match /refund_logs/{logId} {
+      allow read: if isAdmin();
+      allow write: if false;
+    }
+
+    // ─── APP EVENTS (analytics) ─────────────────────────────────────────
+    // App logs events (paywall_open, etc.). Only create; admin can read.
+    match /app_events/{eventId} {
+      allow create: if isSignedIn();
+      allow read: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    // ─── ANALYTICS EVENTS (trial/purchase conversion) ───────────────────
+    // App writes: uid, type (trial_start, purchase_start, purchase_success), timestamp, plan.
+    match /analytics_events/{eventId} {
+      allow create: if isSignedIn();
+      allow read: if isAdmin();
+      allow update, delete: if false;
+    }
+
+    // ─── SCHEDULED POSTS (Instagram automation) ─────────────────────────
+    // users/{uid} may contain: instagramConnected, instagramUserId, accessToken (encrypted), tokenExpiry.
+    // User can create scheduled_posts only with uid == request.auth.uid.
+    // User can read/update/delete only their own scheduled posts. No admin access.
+    match /scheduled_posts/{postId} {
+      allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
+      allow read, update, delete: if isSignedIn() && resource.data.uid == request.auth.uid;
+    }
+
+    // Deny everything else by default.
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

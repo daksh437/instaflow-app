@@ -1,0 +1,12 @@
+{
+  "name": "metapulse_ai",
+  "private": true,
+  "description": "Metapulse AI — root workspace",
+  "scripts": {
+    "start": "npm start --prefix backend",
+    "dev": "npm run dev --prefix backend",
+    "build": "npm start --prefix backend",
+    "backend": "npm start --prefix backend",
+    "audit:ai-routes": "npm run audit:ai-routes --prefix backend"
+  }
+}

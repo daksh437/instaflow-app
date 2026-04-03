@@ -1,0 +1,30 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isResourceOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // User profile photos, scheduled post assets, etc.
+    match /user_uploads/{userId}/{allPaths=**} {
+      allow read: if isResourceOwner(userId);
+      allow write: if isResourceOwner(userId);
+    }
+
+    // Instagram scheduled post media (photo/reel uploads)
+    match /scheduled_media/{userId}/{allPaths=**} {
+      allow read: if isResourceOwner(userId);
+      allow write: if isResourceOwner(userId);
+    }
+
+    // Block everything else by default.
+    match /{allPaths=**} {
+      allow read, write: if false;
+    }
+  }
+}
+

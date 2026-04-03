@@ -1,0 +1,141 @@
+name: insta_flow
+description: "Insta Flow - Smart Social Announcer App powered by AI."
+publish_to: 'none'
+
+version: 1.0.2+12
+
+
+environment:
+  sdk: ">=3.3.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # 🌈 UI Icons
+  cupertino_icons: ^1.0.8
+
+  # 🔥 Firebase Dependencies (Updated to compatible versions)
+  firebase_core: ^3.6.0
+  firebase_auth: ^5.3.1
+  firebase_crashlytics: ^4.1.0
+  firebase_remote_config: ^5.0.4
+  package_info_plus: ^8.0.2
+  cloud_firestore: ^5.4.3
+  firebase_storage: ^12.3.4
+  firebase_analytics: ^11.0.0
+
+  # 💡 State Management
+  provider: ^6.0.5
+
+  # 🔔 Notifications
+  flutter_local_notifications: ^17.2.3
+
+  # 🌐 Network Calls
+  http: ^1.2.2
+
+  # 📶 Connectivity
+  connectivity_plus: ^6.0.5
+
+  # 🎞️ Smooth Page Transitions & Animations
+  animations: ^2.0.11
+
+  # 🔐 Google Sign-In
+  google_sign_in: ^6.2.1
+
+  # 🔔 Firebase Cloud Messaging
+  firebase_messaging: ^15.1.4
+
+  # 📸 Image Picker
+  image_picker: ^1.1.2
+
+  # 🔗 URL Launcher
+  url_launcher: ^6.3.2
+
+  # 📅 Date/Time Picker
+  intl: ^0.19.0
+
+  # 🎨 Image Processing
+  image: ^4.3.0
+
+  # 💾 Shared Preferences
+  shared_preferences: ^2.3.2
+  flutter_secure_storage: ^9.2.2
+
+  # 📘 Facebook Login (Instagram Business)
+  flutter_facebook_auth: ^7.0.6
+
+  # 📊 Charts
+  fl_chart: ^0.69.0
+
+  # 💳 Google Play Billing
+  in_app_purchase: ^3.1.11
+  in_app_purchase_android: ^0.3.6+3
+
+  # 📱 Device info for binding
+  device_info_plus: ^11.1.0
+
+  # 🔄 HTTP Client
+  dio: ^5.7.0
+
+  # 🕐 Timezone
+  timezone: ^0.9.4
+  webview_flutter: ^4.13.1
+  webview_flutter_android: ^4.10.1
+
+  # 📢 Google Mobile Ads
+  google_mobile_ads: ^5.1.0
+
+  # ✨ Shimmer effect for skeleton loaders
+  shimmer: ^3.0.0
+
+  # 🔊 Text-to-speech for AI voice playback
+  flutter_tts: ^3.8.5
+
+  # 🔊 AI Voice (ElevenLabs + playback)
+  just_audio: ^0.9.40
+  path_provider: ^2.1.4
+
+  # 📦 App version for force-update check
+  
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
+  flutter_native_splash: ^2.4.1
+  flutter_launcher_icons: ^0.13.1
+
+flutter:
+  uses-material-design: true
+  
+  # Assets
+  assets:
+    - assets/icon/
+
+# App Icon Configuration
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/icon/app_icon.png"
+  min_sdk_android: 21
+  adaptive_icon_background: "#7B2CBF"
+  adaptive_icon_foreground: "assets/icon/app_icon.png"
+  remove_alpha_ios: true
+  # Force regenerate all icons
+  overwrite: true
+  # Generate round icon as well
+  android_round: false
+
+# Splash Screen Configuration
+flutter_native_splash:
+  color: "#7B2CBF"
+  image: assets/icon/app_icon.png
+  android: true
+  ios: true
+  web: false
+  android_12:
+    color: "#7B2CBF"
+    image: assets/icon/app_icon.png
+  # Don't modify splash screen - we have custom splash
+  android_disable_fullscreen: false

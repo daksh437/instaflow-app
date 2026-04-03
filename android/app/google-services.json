@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "412053319604",
+    "project_id": "instaflow-f65a0",
+    "storage_bucket": "instaflow-f65a0.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:412053319604:android:eccc9045ef3fd714d24ce1",
+        "android_client_info": {
+          "package_name": "com.instaflow"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "412053319604-k5fscpoagnu9rlnlgs3m54u5e97ikb1o.apps.googleusercontent.com",
+          "client_type": 1,
+          "android_info": {
+            "package_name": "com.instaflow",
+            "certificate_hash": "e7254351e391b282909e2dc433695db88f27362d"
+          }
+        },
+        {
+          "client_id": "412053319604-4eerf9lfm4mjg3ijfp74tf5q0g0itbi6.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDJf_BcX9j2s-elirtIYVAjldUCe9DjYXo"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "412053319604-4eerf9lfm4mjg3ijfp74tf5q0g0itbi6.apps.googleusercontent.com",
+              "client_type": 3
+            }
+          ]
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
+
