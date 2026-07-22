@@ -1,6 +1,7 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:flutter/foundation.dart';
 import '../models/admin_user_row.dart';
+import '../models/ai_usage_log_row.dart';
 import '../models/refunded_user_row.dart';
 
 /// Live admin dashboard stats from Firestore users (and ai_usage_logs). Error-safe.
@@ -37,25 +38,26 @@ class AdminDashboardService {
     int todayAiUses = 0;
 
     for (final doc in snapshot.docs) {
-      final d = doc.data() as Map<String, dynamic>? ?? {};
-      final premiumExpiry = (d['premiumExpiry'] as Timestamp?)?.toDate();
-      final trialEnd = (d['trialEnd'] as Timestamp?)?.toDate();
-      final lastActiveAt = (d['lastActiveAt'] as Timestamp?)?.toDate();
-      final aiToday = AdminUserRow.safeInt(d['aiUsesToday']);
-
-      if (d['isPremium'] == true && premiumExpiry != null && premiumExpiry.isAfter(now)) {
+      final row = AdminUserRow.fromDoc(doc);
+      // AdminUserRow.isPremium already means "active premium" (valid future expiry).
+      if (row.isPremium) {
         premium++;
       }
-      if (trialEnd != null && trialEnd.isAfter(now)) {
+      if (row.trialEnd != null && row.trialEnd!.isAfter(now)) {
         trialActive++;
       }
-      if (lastActiveAt != null && !lastActiveAt.isBefore(todayStart)) {
+      if (row.lastActiveAt != null && !row.lastActiveAt!.isBefore(todayStart)) {
         dailyActive++;
       }
-      todayAiUses += aiToday;
+      todayAiUses += row.aiUsesToday;
     }
 
     double conversionPct = total > 0 ? (premium / total) * 100 : 0.0;
+    if (kDebugMode) {
+      debugPrint(
+        '[AdminStats] total=$total premium=$premium trial=$trialActive dailyActive=$dailyActive todayAiUses=$todayAiUses',
+      );
+    }
 
     return AdminDashboardSnapshot(
       totalUsers: total,
@@ -82,7 +84,9 @@ class AdminDashboardService {
   Future<Map<String, int>> getPurchaseBreakdown() async {
     const durations = ['1m', '3m', '6m', '12m'];
     final out = <String, int>{};
-    for (final d in durations) out[d] = 0;
+    for (final d in durations) {
+      out[d] = 0;
+    }
     try {
       var snapshot = await _firestore
           .collection('app_events')
@@ -119,12 +123,19 @@ class AdminDashboardService {
     String search = '',
   }) async {
     try {
-      final snapshot = await _firestore.collection('users').get();
+      final snapshot = await _firestore.collection('users').limit(500).get();
       var list = snapshot.docs.map((d) => AdminUserRow.fromDoc(d)).toList();
-      list.sort((a, b) => a.email.compareTo(b.email));
+      list.sort((a, b) {
+        final aTime = a.lastActiveAt ?? a.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+        final bTime = b.lastActiveAt ?? b.createdAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+        return bTime.compareTo(aTime);
+      });
       if (search.trim().isNotEmpty) {
         final lower = search.trim().toLowerCase();
-        list = list.where((u) => u.email.toLowerCase().contains(lower)).toList();
+        list = list
+            .where((u) =>
+                u.identity.toLowerCase().contains(lower) || u.uid.toLowerCase().contains(lower))
+            .toList();
       }
       final start = (page * limit).clamp(0, list.length);
       return list.skip(start).take(limit).toList();
@@ -142,10 +153,10 @@ class AdminDashboardService {
   }) async {
     try {
       final snapshot = await _firestore.collection('users').get();
-      final now = DateTime.now();
+      // AdminUserRow.isPremium already means "active premium" (valid future expiry).
       var list = snapshot.docs
           .map((d) => AdminUserRow.fromDoc(d))
-          .where((u) => u.isPremium && u.premiumExpiry != null && u.premiumExpiry!.isAfter(now))
+          .where((u) => u.isPremium)
           .toList();
       list.sort((a, b) => (a.email).compareTo(b.email));
       if (search.trim().isNotEmpty) {
@@ -173,10 +184,17 @@ class AdminDashboardService {
           .map((d) => AdminUserRow.fromDoc(d))
           .where((u) => u.trialEnd != null && u.trialEnd!.isAfter(now))
           .toList();
-      list.sort((a, b) => (a.email).compareTo(b.email));
+      list.sort((a, b) {
+        final ta = b.trialEnd ?? DateTime(0);
+        final tb = a.trialEnd ?? DateTime(0);
+        return ta.compareTo(tb);
+      });
       if (search.trim().isNotEmpty) {
         final lower = search.trim().toLowerCase();
-        list = list.where((u) => u.email.toLowerCase().contains(lower)).toList();
+        list = list
+            .where((u) =>
+                u.identity.toLowerCase().contains(lower) || u.uid.toLowerCase().contains(lower))
+            .toList();
       }
       final start = (page * limit).clamp(0, list.length);
       return list.skip(start).take(limit).toList();
@@ -238,6 +256,50 @@ class AdminDashboardService {
     } catch (e) {
       if (kDebugMode) debugPrint('[AdminDashboard] getTodayAiUsagePage: $e');
       return [];
+    }
+  }
+
+  /// Today's AI usage log entries (who used which tool, when) — from
+  /// `ai_usage_logs`, written by the backend on every AI call. Newest first.
+  Future<List<AiUsageLogRow>> getTodayAiUsageLogs({
+    int limit = 200,
+    String search = '',
+  }) async {
+    try {
+      final snapshot = await _firestore
+          .collection('ai_usage_logs')
+          .where('usedAt', isGreaterThanOrEqualTo: Timestamp.fromDate(_todayStart))
+          .orderBy('usedAt', descending: true)
+          .limit(limit)
+          .get();
+      var list = snapshot.docs.map((d) => AiUsageLogRow.fromDoc(d)).toList();
+      if (search.trim().isNotEmpty) {
+        final lower = search.trim().toLowerCase();
+        list = list
+            .where((r) =>
+                r.email.toLowerCase().contains(lower) ||
+                r.toolName.toLowerCase().contains(lower))
+            .toList();
+      }
+      return list;
+    } catch (e) {
+      if (kDebugMode) debugPrint('[AdminDashboard] getTodayAiUsageLogs: $e');
+      return [];
+    }
+  }
+
+  /// Count of today's AI uses (from ai_usage_logs).
+  Future<int> getTodayAiUsageCount() async {
+    try {
+      final agg = await _firestore
+          .collection('ai_usage_logs')
+          .where('usedAt', isGreaterThanOrEqualTo: Timestamp.fromDate(_todayStart))
+          .count()
+          .get();
+      return agg.count ?? 0;
+    } catch (e) {
+      if (kDebugMode) debugPrint('[AdminDashboard] getTodayAiUsageCount: $e');
+      return 0;
     }
   }
 

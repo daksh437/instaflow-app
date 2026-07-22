@@ -1,7 +1,6 @@
 import 'package:flutter/material.dart';
 
 /// Full-screen upgrade popup / dialog. Use for "daily limit reached" or "trial expired".
-/// Optional "Watch ad for +1 use" when [showWatchAdButton] is true and [onWatchAd] is set.
 class UpgradeDialog extends StatelessWidget {
   const UpgradeDialog({
     super.key,
@@ -10,8 +9,6 @@ class UpgradeDialog extends StatelessWidget {
     this.primaryActionLabel = 'Upgrade',
     this.onUpgrade,
     this.onDismiss,
-    this.showWatchAdButton = false,
-    this.onWatchAd,
   });
 
   final String title;
@@ -19,8 +16,6 @@ class UpgradeDialog extends StatelessWidget {
   final String primaryActionLabel;
   final VoidCallback? onUpgrade;
   final VoidCallback? onDismiss;
-  final bool showWatchAdButton;
-  final Future<void> Function(BuildContext context)? onWatchAd;
 
   /// Show as a dialog (modal).
   static Future<void> show(
@@ -30,8 +25,6 @@ class UpgradeDialog extends StatelessWidget {
     String primaryActionLabel = 'Upgrade',
     VoidCallback? onUpgrade,
     VoidCallback? onDismiss,
-    bool showWatchAdButton = false,
-    Future<void> Function(BuildContext context)? onWatchAd,
   }) {
     return showDialog<void>(
       context: context,
@@ -42,8 +35,6 @@ class UpgradeDialog extends StatelessWidget {
         primaryActionLabel: primaryActionLabel,
         onUpgrade: onUpgrade,
         onDismiss: onDismiss,
-        showWatchAdButton: showWatchAdButton,
-        onWatchAd: onWatchAd,
       ),
     );
   }
@@ -76,20 +67,6 @@ class UpgradeDialog extends StatelessWidget {
               textAlign: TextAlign.center,
             ),
             const SizedBox(height: 24),
-            if (showWatchAdButton && onWatchAd != null) ...[
-              OutlinedButton.icon(
-                onPressed: () async {
-                  await onWatchAd!(context);
-                },
-                icon: const Icon(Icons.play_circle_outline, size: 20),
-                label: const Text('Watch ad for +1 use today'),
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: const Color(0xFF7B2CBF),
-                  side: const BorderSide(color: Color(0xFF7B2CBF)),
-                ),
-              ),
-              const SizedBox(height: 12),
-            ],
             Row(
               mainAxisAlignment: MainAxisAlignment.center,
               children: [

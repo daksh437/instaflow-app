@@ -28,6 +28,9 @@ class _MainNavigationWrapperState extends State<MainNavigationWrapper> {
         Navigator.pushReplacementNamed(context, '/ai-tools');
         break;
       case 2:
+        Navigator.pushReplacementNamed(context, '/premium-hub');
+        break;
+      case 3:
         Navigator.pushReplacementNamed(context, '/profile');
         break;
     }
@@ -38,11 +41,12 @@ class _MainNavigationWrapperState extends State<MainNavigationWrapper> {
     return Scaffold(
       body: widget.child,
       floatingActionButton: widget.floatingActionButton,
+      floatingActionButtonLocation: FloatingActionButtonLocation.endFloat,
       bottomNavigationBar: Container(
         decoration: BoxDecoration(
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(0.05),
+              color: Colors.black.withValues(alpha: 0.05),
               blurRadius: 10,
               offset: const Offset(0, -2),
             ),
@@ -50,7 +54,7 @@ class _MainNavigationWrapperState extends State<MainNavigationWrapper> {
         ),
         child: BottomNavigationBar(
           backgroundColor: Colors.white,
-          selectedItemColor: const Color(0xFF7B2CBF),
+          selectedItemColor: const Color(0xFF7B61FF),
           unselectedItemColor: Colors.grey[400],
           currentIndex: widget.currentIndex,
           elevation: 0,
@@ -68,6 +72,11 @@ class _MainNavigationWrapperState extends State<MainNavigationWrapper> {
               icon: Icon(Icons.auto_awesome, size: 24),
               activeIcon: Icon(Icons.auto_awesome, size: 24),
               label: 'AI Tools',
+            ),
+            BottomNavigationBarItem(
+              icon: Icon(Icons.workspace_premium_outlined, size: 24),
+              activeIcon: Icon(Icons.workspace_premium_rounded, size: 24),
+              label: 'Premium',
             ),
             BottomNavigationBarItem(
               icon: Icon(Icons.person_outline_rounded, size: 24),

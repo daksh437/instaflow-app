@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../widgets/ai_ad_banner.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../services/ai_service.dart';
@@ -25,6 +26,24 @@ class _ReelScriptScreenState extends State<ReelScriptScreen> {
   final HistoryService _historyService = HistoryService();
   bool _isGenerating = false;
   String? _script;
+
+  String _buildFallbackScript(String topic) {
+    final safeTopic = topic.isNotEmpty ? topic : 'your topic';
+    return '''HOOK (0-3s):
+"Stop scrolling! This $safeTopic framework can increase reel retention fast."
+
+BODY (3-12s):
+"Most creators miss this:
+1. Open with one bold line
+2. Give one clear actionable tip
+3. End with a direct CTA
+Try this structure in your next reel."
+
+CTA (12-15s):
+"Save this and comment 'SCRIPT' for part 2.
+
+#reels #instagramgrowth #contentcreator #$safeTopic"''';
+  }
 
   @override
   void initState() {
@@ -110,43 +129,47 @@ CTA (12-15s):
           }
           return true;
         } catch (e) {
-          setState(() => _isGenerating = false);
           if (!mounted) return false;
+          final topic = _inputController.text.trim();
+          setState(() {
+            _script = _buildFallbackScript(topic);
+            _isGenerating = false;
+          });
           ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text(
-                e.toString().contains('unavailable')
-                    ? 'AI service is currently unavailable. Please try again later.'
-                    : 'Error generating script. Please try again.',
-              ),
-              backgroundColor: Colors.red,
-              duration: const Duration(seconds: 3),
+            const SnackBar(
+              content: Text('AI is busy right now. Showing backup script.'),
+              backgroundColor: Color(0xFF7B2CBF),
+              duration: Duration(seconds: 2),
             ),
           );
-          rethrow;
+          return true;
         }
       },
       );
       if (result != true) {
-        setState(() => _isGenerating = false);
+        final topic = _inputController.text.trim();
+        setState(() {
+          _script = _buildFallbackScript(topic);
+          _isGenerating = false;
+        });
         return;
       }
     } catch (e) {
-    setState(() => _isGenerating = false);
-    if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text(
-          e.toString().contains('unavailable')
-              ? 'AI service is currently unavailable. Please try again later.'
-              : 'Error generating script. Please try again.',
+      if (!mounted) return;
+      final topic = _inputController.text.trim();
+      setState(() {
+        _script = _buildFallbackScript(topic);
+        _isGenerating = false;
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Network issue. Showing backup script.'),
+          backgroundColor: Color(0xFF7B2CBF),
+          duration: Duration(seconds: 2),
         ),
-        backgroundColor: Colors.red,
-        duration: const Duration(seconds: 3),
-      ),
-    );
+      );
+    }
   }
-}
 
   void _copyToClipboard() {
     if (_script != null) {
@@ -171,6 +194,7 @@ CTA (12-15s):
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      bottomNavigationBar: const AiAdBanner(),
       backgroundColor: Colors.white,
       appBar: AppBar(
         title: const Text('Reel Script Generator'),

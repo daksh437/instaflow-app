@@ -2,14 +2,15 @@ import 'package:flutter/material.dart';
 import 'package:fl_chart/fl_chart.dart';
 import '../services/admin_dashboard_service.dart';
 import '../utils/admin_guard.dart';
-import '../utils/app_error_handler.dart';
 import '../widgets/error_retry_card.dart';
 import 'admin/admin_user_list_screen.dart';
+import 'admin/admin_user_manage_screen.dart';
 import 'admin/admin_premium_users_screen.dart';
 import 'admin/admin_trial_users_screen.dart';
 import 'admin/admin_active_users_screen.dart';
 import 'admin/admin_ai_usage_screen.dart';
 import 'admin/admin_refunded_screen.dart';
+import 'admin/admin_notifications_screen.dart';
 
 class AdminDashboardScreen extends StatefulWidget {
   const AdminDashboardScreen({super.key});
@@ -24,9 +25,9 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
 
   bool _adminCheckDone = false;
   bool _isAdmin = false;
-  String? _error;
   Map<String, int> _purchaseBreakdown = {};
   int _refundedCount = 0;
+  int _todayAiUses = 0;
 
   @override
   void initState() {
@@ -53,10 +54,14 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
     try {
       final breakdown = await _dashboard.getPurchaseBreakdown();
       final refunded = await _dashboard.getRefundedCount();
-      if (mounted) setState(() {
-        _purchaseBreakdown = breakdown;
-        _refundedCount = refunded;
-      });
+      final aiUses = await _dashboard.getTodayAiUsageCount();
+      if (mounted) {
+        setState(() {
+          _purchaseBreakdown = breakdown;
+          _refundedCount = refunded;
+          _todayAiUses = aiUses;
+        });
+      }
     } catch (_) {}
   }
 
@@ -122,6 +127,11 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         foregroundColor: Colors.white,
         elevation: 0,
         actions: [
+          IconButton(
+            onPressed: () => _navigateTo('admin-notifications', const AdminNotificationsScreen()),
+            icon: const Icon(Icons.notifications_active_outlined),
+            tooltip: 'Notifications',
+          ),
           TextButton.icon(
             onPressed: () => Navigator.pushNamed(context, '/admin-feedback'),
             icon: const Icon(Icons.feedback_outlined, color: Colors.white, size: 20),
@@ -154,6 +164,18 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.stretch,
                       children: [
+                        FilledButton.icon(
+                          onPressed: () => Navigator.of(context).push(
+                            MaterialPageRoute(builder: (_) => const AdminUserManageScreen()),
+                          ),
+                          icon: const Icon(Icons.manage_accounts_rounded),
+                          label: const Text('Manage a user (grant/revoke premium)'),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFF7B2CBF),
+                            minimumSize: const Size.fromHeight(52),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
                         _buildMetricGrid(data),
                         const SizedBox(height: 24),
                         _buildChartCard(),
@@ -199,7 +221,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         _MetricCard(
           title: 'Trial → Premium %',
           value: data.totalUsers > 0
-              ? '${data.conversionPct.toStringAsFixed(1)}%'
+              ? '${data.conversionPct.toStringAsFixed(2)}%'
               : '0%',
           icon: Icons.trending_up_rounded,
           color: (Colors.green[700] ?? Colors.green),
@@ -214,7 +236,7 @@ class _AdminDashboardScreenState extends State<AdminDashboardScreen> {
         ),
         _MetricCard(
           title: 'Today AI Uses',
-          value: '${data.todayAiUses}',
+          value: '$_todayAiUses',
           icon: Icons.smart_toy_rounded,
           color: (Colors.blue[700] ?? Colors.blue),
           onTap: () => _navigateTo('ai', const AdminAIUsageScreen()),

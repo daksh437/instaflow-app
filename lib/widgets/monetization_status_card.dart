@@ -6,12 +6,25 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import '../config/monetization_config.dart';
 import '../services/monetization_service.dart';
 
-/// Home usage card: planType, trialEndDate, premiumExpiry, dailyUsedCount, dailyResetDate.
-/// Countdown = time until midnight (00:00). Timer.periodic(1s).
+/// Home usage: plan, trial, or free daily limit with midnight reset.
+/// [style] `glassOnGradient` = legacy frosted chip on purple header.
+/// [style] `elevatedLight` = single white SaaS card (no duplicate lines).
+enum MonetizationCardStyle {
+  glassOnGradient,
+  elevatedLight,
+}
+
 class MonetizationStatusCard extends StatefulWidget {
-  const MonetizationStatusCard({super.key, this.onGoToPremium});
+  const MonetizationStatusCard({
+    super.key,
+    this.onGoToPremium,
+    this.style = MonetizationCardStyle.glassOnGradient,
+    this.primaryColor = const Color(0xFF7B61FF),
+  });
 
   final VoidCallback? onGoToPremium;
+  final MonetizationCardStyle style;
+  final Color primaryColor;
 
   @override
   State<MonetizationStatusCard> createState() => _MonetizationStatusCardState();
@@ -65,24 +78,54 @@ class _MonetizationStatusCardState extends State<MonetizationStatusCard> {
     return '${h.toString().padLeft(2, '0')}:${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
+  bool get _light => widget.style == MonetizationCardStyle.elevatedLight;
+
   @override
   Widget build(BuildContext context) {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) {
-      return _buildCard(child: const Text('Sign in to see your plan', style: TextStyle(color: Colors.white, fontSize: 14)));
+      return _wrap(
+        child: Text(
+          'Sign in to see your plan',
+          style: TextStyle(
+            color: _light ? const Color(0xFF424242) : Colors.white,
+            fontSize: 14,
+          ),
+        ),
+      );
     }
 
     return StreamBuilder<DocumentSnapshot>(
       stream: FirebaseFirestore.instance.collection('users').doc(user.uid).snapshots(),
       builder: (context, snapshot) {
-        if (!snapshot.hasData || !snapshot.data!.exists) {
-          return _buildCard(
-            child: const SizedBox(height: 24, width: 24, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white)),
+        final doc = snapshot.data;
+        if (snapshot.connectionState == ConnectionState.waiting && doc == null) {
+          return _wrap(
+            child: SizedBox(
+              height: 24,
+              width: 24,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: _light ? widget.primaryColor : Colors.white,
+              ),
+            ),
+          );
+        }
+        if (doc == null || !doc.exists) {
+          return _wrap(
+            child: SizedBox(
+              height: 24,
+              width: 24,
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: _light ? widget.primaryColor : Colors.white,
+              ),
+            ),
           );
         }
 
-        final data = snapshot.data!.data() as Map<String, dynamic>?;
-        if (data == null) return _buildCard(child: const SizedBox.shrink());
+        final data = doc.data() as Map<String, dynamic>?;
+        if (data == null) return _wrap(child: const SizedBox.shrink());
 
         final now = DateTime.now();
         final planType = (data['planType'] ?? 'free').toString();
@@ -94,16 +137,29 @@ class _MonetizationStatusCardState extends State<MonetizationStatusCard> {
 
         if (isPremium) {
           _stopCountdown();
-          final expStr = premiumExpiry != null ? '${premiumExpiry.day} ${_months[premiumExpiry.month - 1]} ${premiumExpiry.year}' : '';
-          return _buildCard(
+          final expStr =
+              '${premiumExpiry.day} ${_months[premiumExpiry.month - 1]} ${premiumExpiry.year}';
+          return _wrap(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text('Unlimited', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600)),
-                if (expStr.isNotEmpty) Text('Premium until $expStr', style: TextStyle(color: Colors.white.withOpacity(0.9), fontSize: 12)),
-                const SizedBox(height: 6),
-                Text('Resets at midnight — ${_formatCountdown(MonetizationService.getTimeUntilMidnight())}', style: TextStyle(color: Colors.white.withOpacity(0.85), fontSize: 11)),
+                Text(
+                  'Premium — unlimited AI',
+                  style: _titleStyle(),
+                ),
+                if (expStr.isNotEmpty) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Renews / valid until $expStr',
+                    style: _subStyle(),
+                  ),
+                ],
+                const SizedBox(height: 10),
+                Text(
+                  'Daily streak window resets in ${_formatCountdown(MonetizationService.getTimeUntilMidnight())}',
+                  style: _hintStyle(),
+                ),
               ],
             ),
           );
@@ -111,16 +167,20 @@ class _MonetizationStatusCardState extends State<MonetizationStatusCard> {
 
         if (isTrial) {
           _stopCountdown();
-          final daysLeft = trialEndDate!.difference(now).inDays.clamp(0, MonetizationConfig.trialDaysCount);
-          return _buildCard(
+          final daysLeft = trialEndDate.difference(now).inDays.clamp(0, MonetizationConfig.trialDaysCount);
+          return _wrap(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Text('Trial Unlimited', style: TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600)),
-                Text('$daysLeft days left', style: TextStyle(color: Colors.white.withOpacity(0.9), fontSize: 12)),
-                const SizedBox(height: 6),
-                Text('Resets at midnight — ${_formatCountdown(MonetizationService.getTimeUntilMidnight())}', style: TextStyle(color: Colors.white.withOpacity(0.85), fontSize: 11)),
+                Text('Trial — unlimited AI', style: _titleStyle()),
+                const SizedBox(height: 4),
+                Text('$daysLeft days left in trial', style: _subStyle()),
+                const SizedBox(height: 10),
+                Text(
+                  'Resets in ${_formatCountdown(MonetizationService.getTimeUntilMidnight())}',
+                  style: _hintStyle(),
+                ),
               ],
             ),
           );
@@ -130,25 +190,53 @@ class _MonetizationStatusCardState extends State<MonetizationStatusCard> {
         int count = (data['dailyUsedCount'] is int) ? data['dailyUsedCount'] as int : 0;
         if (!_isSameCalendarDay(resetDate, now)) count = 0;
         count = count.clamp(0, MonetizationConfig.dailyFreeUsesLimit);
-        final remaining = (MonetizationConfig.dailyFreeUsesLimit - count).clamp(0, MonetizationConfig.dailyFreeUsesLimit);
+        final remaining =
+            (MonetizationConfig.dailyFreeUsesLimit - count).clamp(0, MonetizationConfig.dailyFreeUsesLimit);
+        final limit = MonetizationConfig.dailyFreeUsesLimit;
         _startMidnightCountdown();
         final displayCountdown = _countdown.inSeconds > 0 ? _countdown : MonetizationService.getTimeUntilMidnight();
 
-        return _buildCard(
+        final usedFraction = limit > 0 ? (count / limit).clamp(0.0, 1.0) : 0.0;
+
+        return _wrap(
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              Text('$remaining / ${MonetizationConfig.dailyFreeUsesLimit} uses left today', style: const TextStyle(color: Colors.white, fontSize: 16, fontWeight: FontWeight.w600)),
-              const SizedBox(height: 6),
-              Text('Next reset at midnight — ${_formatCountdown(displayCountdown)}', style: TextStyle(color: Colors.white.withOpacity(0.9), fontSize: 12)),
+              Text(
+                '$remaining / $limit uses left today',
+                style: _titleStyle(),
+              ),
+              const SizedBox(height: 10),
+              ClipRRect(
+                borderRadius: BorderRadius.circular(8),
+                child: LinearProgressIndicator(
+                  value: usedFraction,
+                  minHeight: 8,
+                  backgroundColor: _light ? const Color(0xFFF0EDFF) : Colors.white.withValues(alpha: 0.25),
+                  valueColor: AlwaysStoppedAnimation<Color>(
+                    _light ? widget.primaryColor : Colors.white,
+                  ),
+                ),
+              ),
+              const SizedBox(height: 10),
+              Text(
+                'Next reset in ${_formatCountdown(displayCountdown)}',
+                style: _subStyle(),
+              ),
               if (remaining == 0) ...[
-                const SizedBox(height: 8),
-                TextButton.icon(
-                  onPressed: widget.onGoToPremium ?? () => Navigator.pushNamed(context, '/premium'),
-                  icon: const Icon(Icons.workspace_premium, color: Colors.white, size: 18),
-                  label: const Text('Go To Premium', style: TextStyle(color: Colors.white, fontWeight: FontWeight.w600)),
-                  style: TextButton.styleFrom(backgroundColor: Colors.white.withOpacity(0.2), padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6)),
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  child: FilledButton.icon(
+                    onPressed: widget.onGoToPremium ?? () => Navigator.pushNamed(context, '/premium'),
+                    icon: const Icon(Icons.workspace_premium, size: 18),
+                    label: const Text('Go premium'),
+                    style: FilledButton.styleFrom(
+                      backgroundColor: widget.primaryColor,
+                      foregroundColor: Colors.white,
+                    ),
+                  ),
                 ),
               ],
             ],
@@ -158,16 +246,63 @@ class _MonetizationStatusCardState extends State<MonetizationStatusCard> {
     );
   }
 
+  TextStyle _titleStyle() {
+    return TextStyle(
+      color: _light ? const Color(0xFF1A1A1A) : Colors.white,
+      fontSize: 16,
+      fontWeight: FontWeight.w700,
+      letterSpacing: -0.2,
+    );
+  }
+
+  TextStyle _subStyle() {
+    return TextStyle(
+      color: _light ? const Color(0xFF616161) : Colors.white.withValues(alpha: 0.92),
+      fontSize: 13,
+      fontWeight: FontWeight.w500,
+    );
+  }
+
+  TextStyle _hintStyle() {
+    return TextStyle(
+      color: _light ? const Color(0xFF757575) : Colors.white.withValues(alpha: 0.85),
+      fontSize: 12,
+    );
+  }
+
   static const _months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
 
-  Widget _buildCard({required Widget child}) {
+  Widget _wrap({required Widget child}) {
+    if (widget.style == MonetizationCardStyle.elevatedLight) {
+      return Container(
+        width: double.infinity,
+        padding: const EdgeInsets.all(20),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(20),
+          boxShadow: [
+            BoxShadow(
+              color: widget.primaryColor.withValues(alpha: 0.12),
+              blurRadius: 24,
+              offset: const Offset(0, 8),
+            ),
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.04),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
+            ),
+          ],
+        ),
+        child: child,
+      );
+    }
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.white.withOpacity(0.15),
+        color: Colors.white.withValues(alpha: 0.15),
         borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: Colors.white.withOpacity(0.25)),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.25)),
       ),
       child: child,
     );

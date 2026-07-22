@@ -1,16 +1,32 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../widgets/ai_ad_banner.dart';
 import 'package:flutter/services.dart';
 import '../services/ai_service.dart';
+import '../services/analytics_service.dart';
 import '../services/ai_usage_control_service.dart';
 import '../services/history_service.dart';
 import '../services/voice_service.dart';
 import '../utils/ai_usage_guard.dart';
+import '../utils/app_error_handler.dart';
 import '../widgets/ai_credit_badge.dart';
 import '../widgets/ai_plan_countdown.dart';
 import '../widgets/ai_progressive_loading.dart';
 import '../widgets/voice_play_button.dart';
 import 'history_screen.dart';
+
+class _IdeasQuickTopic {
+  const _IdeasQuickTopic(this.label, this.text);
+  final String label;
+  final String text;
+}
+
+const List<_IdeasQuickTopic> _kIdeasQuickTopics = [
+  _IdeasQuickTopic('Fitness', 'Fitness & home workouts for busy professionals'),
+  _IdeasQuickTopic('Food', 'Easy Indian recipes for beginners'),
+  _IdeasQuickTopic('Business', 'Small business tips & Instagram growth'),
+  _IdeasQuickTopic('Lifestyle', 'Minimal lifestyle & productivity for students'),
+];
 
 class IdeasScreen extends StatefulWidget {
   const IdeasScreen({super.key});
@@ -35,7 +51,10 @@ class _IdeasScreenState extends State<IdeasScreen> {
   Future<void> _generateIdeas() async {
     if (_inputController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter your niche')),
+        const SnackBar(
+          content: Text('Enter your niche or tap a quick idea below.'),
+          backgroundColor: Colors.orange,
+        ),
       );
       return;
     }
@@ -67,6 +86,8 @@ class _IdeasScreenState extends State<IdeasScreen> {
         _isGenerating = false;
       });
 
+      AnalyticsService.logAiToolUsed(toolId: 'ideas');
+
       // Save to history
       if (ideas.isNotEmpty) {
         await _historyService.saveHistory(
@@ -91,27 +112,36 @@ class _IdeasScreenState extends State<IdeasScreen> {
       if (kDebugMode) debugPrint('[IdeasScreen] ❌ Error: $e');
       setState(() => _isGenerating = false);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            e.toString().contains('unavailable') || e.toString().contains('Failed')
-                ? 'AI service error: ${e.toString()}'
-                : 'Error generating ideas: ${e.toString()}',
-          ),
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 5),
-        ),
-      );
+      await AppErrorHandler.log('IdeasScreen', e);
+      if (!mounted) return;
+      AppErrorHandler.show(context, e);
     }
   }
 
-  void _copyIdea(String idea) {
-    Clipboard.setData(ClipboardData(text: idea));
+  Future<void> _copyIdea(String idea) async {
+    await Clipboard.setData(ClipboardData(text: idea));
+    await AnalyticsService.logFirstAiResultCopiedOnce(toolId: 'ideas');
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Idea copied!'),
+        content: Text('Copied — paste in Instagram.'),
         backgroundColor: Color(0xFF7B2CBF),
-        duration: Duration(seconds: 1),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  Future<void> _copyAllIdeas() async {
+    if (_ideas.isEmpty) return;
+    final text = _ideas.join('\n\n');
+    await Clipboard.setData(ClipboardData(text: text));
+    await AnalyticsService.logFirstAiResultCopiedOnce(toolId: 'ideas');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Copied — paste in Instagram.'),
+        backgroundColor: Color(0xFF7B2CBF),
+        behavior: SnackBarBehavior.floating,
       ),
     );
   }
@@ -126,6 +156,7 @@ class _IdeasScreenState extends State<IdeasScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      bottomNavigationBar: const AiAdBanner(),
       backgroundColor: Colors.white,
       appBar: AppBar(
         title: const Text('Post Ideas Generator'),
@@ -191,7 +222,43 @@ class _IdeasScreenState extends State<IdeasScreen> {
                   contentPadding: const EdgeInsets.all(20),
                 ),
                 style: const TextStyle(fontSize: 16),
+                onChanged: (_) => setState(() {}),
               ),
+            ),
+
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Quick ideas',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey[800],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: _kIdeasQuickTopics.map((t) {
+                return ActionChip(
+                  label: Text(t.label),
+                  onPressed: () {
+                    setState(() {
+                      _inputController.text = t.text;
+                    });
+                  },
+                  backgroundColor: Colors.grey[100],
+                  side: BorderSide(color: Colors.grey[300]!),
+                  labelStyle: const TextStyle(
+                    fontSize: 13,
+                    color: Color(0xFF4A148C),
+                    fontWeight: FontWeight.w500,
+                  ),
+                );
+              }).toList(),
             ),
 
             const SizedBox(height: 24),
@@ -200,6 +267,7 @@ class _IdeasScreenState extends State<IdeasScreen> {
               valueListenable: AiUsageControlService.instance.state,
               builder: (_, state, __) {
                 final blocked = state != null && state.isFree && state.isLimitReached;
+                final resetAtUtc = state?.resetAtUtc;
                 return Column(
                   mainAxisSize: MainAxisSize.min,
                   children: [
@@ -228,13 +296,27 @@ class _IdeasScreenState extends State<IdeasScreen> {
                           ),
                         ),
                         child: _isGenerating
-                            ? const SizedBox(
-                                height: 24,
-                                width: 24,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
+                            ? const Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  SizedBox(
+                                    height: 22,
+                                    width: 22,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                  SizedBox(width: 12),
+                                  Text(
+                                    'Generating ideas…',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
                               )
                             : Row(
                                 mainAxisAlignment: MainAxisAlignment.center,
@@ -253,9 +335,9 @@ class _IdeasScreenState extends State<IdeasScreen> {
                               ),
                       ),
                     ),
-                    if (blocked && state?.resetAtUtc != null && state!.resetAtUtc!.isNotEmpty) ...[
+                    if (blocked && resetAtUtc != null && resetAtUtc.isNotEmpty) ...[
                       const SizedBox(height: 8),
-                      AiPlanCountdown(resetAtUtc: state.resetAtUtc, prefix: 'New free credits in '),
+                      AiPlanCountdown(resetAtUtc: resetAtUtc, prefix: 'New free credits in '),
                     ],
                   ],
                 );
@@ -271,7 +353,11 @@ class _IdeasScreenState extends State<IdeasScreen> {
                   borderRadius: BorderRadius.circular(24),
                 ),
                 child: const AiProgressiveLoading(
-                  messages: ['Analyzing…', 'Generating ideas…', 'Optimizing output…'],
+                  messages: [
+                    'Understanding your niche…',
+                    'Brainstorming ideas…',
+                    'Almost ready…',
+                  ],
                   accentColor: Color(0xFF7B2CBF),
                 ),
               ),
@@ -279,12 +365,39 @@ class _IdeasScreenState extends State<IdeasScreen> {
 
             if (_ideas.isNotEmpty) ...[
               const SizedBox(height: 32),
-              Text(
-                'Post Ideas (${_ideas.length})',
-                style: const TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.bold,
-                  color: Color(0xFF1A1A1A),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Post Ideas (${_ideas.length})',
+                      style: const TextStyle(
+                        fontSize: 20,
+                        fontWeight: FontWeight.bold,
+                        color: Color(0xFF1A1A1A),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: _copyAllIdeas,
+                  icon: const Icon(Icons.copy_all_rounded, size: 22),
+                  label: const Text(
+                    'Copy all ideas',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF7B2CBF),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
                 ),
               ),
               const SizedBox(height: 20),
@@ -352,7 +465,7 @@ class _IdeasScreenState extends State<IdeasScreen> {
                                   output: _ideas[index],
                                   metadata: {'idea_index': index + 1},
                                 );
-                                if (!mounted) return;
+                                if (!context.mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
                                     content: Text('Saved to history!'),
@@ -360,7 +473,7 @@ class _IdeasScreenState extends State<IdeasScreen> {
                                   ),
                                 );
                               } catch (e) {
-                                if (!mounted) return;
+                                if (!context.mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   SnackBar(content: Text('Error saving: $e')),
                                 );

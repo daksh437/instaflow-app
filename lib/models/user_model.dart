@@ -1,5 +1,8 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 
+// subscriptionPlan (UI): resolved to match backend plan order — premiumExpiry > now
+//   => pro/ultra; else active trial window => trial; else free (stale pro/trial strings ignored).
+
 class UserModel {
   final String uid;
   final String email;
@@ -69,13 +72,40 @@ class UserModel {
       DateTime.now().isBefore(trialEnd!);
 
   factory UserModel.fromFirestore(Map<String, dynamic> data, String uid) {
-    final planString = (data['subscriptionPlan'] ?? 'trial').toString();
+    final now = DateTime.now();
     final rawCount = data['dailyAiUsed'] ?? data['dailyFreeUsedCount'];
     final dailyFreeUsedCount = rawCount is int
         ? rawCount
         : (rawCount is num ? rawCount.toInt() : 0);
     final lastUsage = (data['lastAiReset'] as Timestamp?)?.toDate() ?? (data['lastUsageDate'] as Timestamp?)?.toDate();
-    final trialEndDate = (data['trialExpiry'] as Timestamp?)?.toDate() ?? (data['trialEnd'] as Timestamp?)?.toDate();
+    final trialEndDate = (data['trialExpiry'] as Timestamp?)?.toDate() ??
+        (data['trialEnd'] as Timestamp?)?.toDate() ??
+        (data['trialEndDate'] as Timestamp?)?.toDate();
+    final premiumExpiry = (data['premiumExpiry'] as Timestamp?)?.toDate();
+    final storedRaw = (data['subscriptionPlan'] ?? '').toString().trim();
+    final storedLower = storedRaw.toLowerCase();
+
+    final hasActivePremium = premiumExpiry != null && premiumExpiry.isAfter(now);
+
+    late final SubscriptionPlan subscriptionPlanResolved;
+    if (hasActivePremium) {
+      // Legacy Firestore mistake: subscriptionPlan "premium" — treat as pro when expiry is active.
+      subscriptionPlanResolved =
+          storedLower == 'ultra' ? SubscriptionPlan.ultra : SubscriptionPlan.pro;
+    } else if (trialEndDate != null && trialEndDate.isAfter(now)) {
+      subscriptionPlanResolved = SubscriptionPlan.trial;
+    } else {
+      if (storedLower.isEmpty || storedLower == 'trial') {
+        subscriptionPlanResolved = SubscriptionPlan.free;
+      } else if (storedLower == 'pro' ||
+          storedLower == 'ultra' ||
+          storedLower == 'premium') {
+        subscriptionPlanResolved = SubscriptionPlan.free;
+      } else {
+        subscriptionPlanResolved = SubscriptionPlanParser.fromString(storedLower);
+      }
+    }
+
     return UserModel(
       uid: uid,
       email: (data['email'] ?? '').toString(),
@@ -83,7 +113,7 @@ class UserModel {
       photoURL: data['photoURL']?.toString(),
       instagramUsername: data['instagramUsername']?.toString(),
       instagramAccessToken: data['instagramAccessToken']?.toString(),
-      subscriptionPlan: SubscriptionPlanParser.fromString(planString),
+      subscriptionPlan: subscriptionPlanResolved,
       createdAt: (data['createdAt'] as Timestamp?)?.toDate() ?? DateTime.now(),
       trialEndsAt: (data['trialEndsAt'] as Timestamp?)?.toDate(),
       stripeCustomerId: data['stripeCustomerId']?.toString(),
@@ -141,7 +171,7 @@ class UserModel {
 // Collection: users
 // Fields:
 //   email, displayName, photoURL, createdAt, preferences
-//   subscriptionPlan: 'trial' | 'free' | 'pro' | 'ultra'
+//   subscriptionPlan: 'trial' | 'free' | 'pro' | 'ultra' (legacy 'premium' => pro)
 //   isTrialActive: bool
 //   trialStart / trialStartDate: Timestamp   (trial start)
 //   trialEnd / trialEndDate: Timestamp       (trial end = now + 7 days for new users)

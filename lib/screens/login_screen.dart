@@ -2,7 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter/gestures.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:google_sign_in/google_sign_in.dart';
+import '../services/auth_service.dart';
 import '../utils/app_error_handler.dart';
 
 class LoginScreen extends StatefulWidget {
@@ -14,7 +14,7 @@ class LoginScreen extends StatefulWidget {
 
 class _LoginScreenState extends State<LoginScreen>
     with SingleTickerProviderStateMixin {
-  final _auth = FirebaseAuth.instance;
+  final _authService = AuthService();
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
@@ -44,9 +44,9 @@ class _LoginScreenState extends State<LoginScreen>
     setState(() => _loading = true);
 
     try {
-      await _auth.signInWithEmailAndPassword(
-        email: _emailController.text.trim(),
-        password: _passwordController.text.trim(),
+      await _authService.signInWithEmailAndPassword(
+        _emailController.text.trim(),
+        _passwordController.text.trim(),
       );
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
@@ -80,92 +80,11 @@ class _LoginScreenState extends State<LoginScreen>
 
   Future<void> _signInWithGoogle() async {
     setState(() => _loading = true);
-    
+
     try {
-      // Configure GoogleSignIn with proper scopes
-      // Use the Web client ID (client_type: 3) as serverClientId for better compatibility
-      // This is required for proper OAuth flow with Firebase
-      final GoogleSignIn googleSignIn = GoogleSignIn(
-        scopes: [
-          'email',
-          'profile',
-        ],
-        // Use Web client ID from google-services.json (client_type: 3)
-        // This is the OAuth 2.0 client ID for server-side authentication
-        serverClientId: '412053319604-4eerf9lfm4mjg3ijfp74tf5q0g0itbi6.apps.googleusercontent.com',
-      );
+      final credential = await _authService.signInWithGoogle();
 
-      // Sign out first to clear any cached accounts
-      await googleSignIn.signOut();
-
-      final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
-      
-      if (googleUser == null) {
-        if (mounted) setState(() => _loading = false);
-        return;
-      }
-
-      final GoogleSignInAuthentication googleAuth =
-          await googleUser.authentication;
-
-      // Check if we have ID token
-      if (googleAuth.idToken == null) {
-        // Try to get ID token again - sometimes it needs a retry
-        try {
-          // Clear cache and try again
-          await googleUser.clearAuthCache();
-          final retryAuth = await googleUser.authentication;
-          
-          if (retryAuth.idToken == null) {
-            // More detailed error for debugging
-            throw PlatformException(
-              code: 'id_token_missing',
-              message: 'ID token not available. This usually means:\n'
-                  '1. Release keystore SHA-1 not added in Firebase Console\n'
-                  '2. OAuth client not properly configured in Google Cloud Console\n'
-                  '3. App needs to be reinstalled after Firebase changes\n\n'
-                  'Debug SHA-1: e7:25:43:51:e3:91:b2:82:90:9e:2d:c4:33:69:5d:b8:8f:27:36:2d\n'
-                  'Please add release keystore SHA-1 if using release build.',
-            );
-          }
-          
-          // Use retry auth
-          final credential = GoogleAuthProvider.credential(
-            accessToken: retryAuth.accessToken,
-            idToken: retryAuth.idToken,
-          );
-          
-          await FirebaseAuth.instance.signInWithCredential(credential);
-          
-          if (!mounted) return;
-          
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text("Logged in with Google 💜"),
-              backgroundColor: Colors.deepPurple,
-              duration: Duration(seconds: 2),
-            ),
-          );
-          
-          Navigator.pushReplacementNamed(context, '/home');
-          return;
-        } catch (retryError) {
-          throw PlatformException(
-            code: 'id_token_retry_failed',
-            message: 'Failed to get ID token after retry. Please:\n'
-                '1. Uninstall and reinstall the app\n'
-                '2. Check if release keystore SHA-1 is added in Firebase Console\n'
-                '3. Verify OAuth client in Google Cloud Console',
-          );
-        }
-      }
-
-      final credential = GoogleAuthProvider.credential(
-        accessToken: googleAuth.accessToken,
-        idToken: googleAuth.idToken,
-      );
-
-      await FirebaseAuth.instance.signInWithCredential(credential);
+      if (credential == null) return;
 
       if (!mounted) return;
 
@@ -179,13 +98,12 @@ class _LoginScreenState extends State<LoginScreen>
 
       Navigator.pushReplacementNamed(context, '/home');
     } on PlatformException catch (e) {
-      if (mounted) setState(() => _loading = false);
       String errorMessage = 'Google sign-in failed';
-      
-      // Handle specific error codes
-      if (e.code == 'sign_in_failed' || e.code == 'id_token_missing' || e.code == 'id_token_retry_failed') {
-        // Check if it's a release build issue
-        if (e.message?.contains('release keystore') == true || 
+
+      if (e.code == 'sign_in_failed' ||
+          e.code == 'id_token_missing' ||
+          e.code == 'id_token_retry_failed') {
+        if (e.message?.contains('release keystore') == true ||
             e.message?.contains('Release keystore') == true) {
           errorMessage = 'Release build detected.\n\n'
               'Please add RELEASE keystore SHA-1 in Firebase Console.\n\n'
@@ -193,7 +111,6 @@ class _LoginScreenState extends State<LoginScreen>
               'Release SHA-1 needed: ⚠️\n\n'
               'Contact: instaflow38@gmail.com';
         } else {
-          // User-friendly error message for configuration issues
           errorMessage = 'Google Sign-In temporarily unavailable.\n\n'
               'Please use Email/Password login for now.\n\n'
               'Contact support: instaflow38@gmail.com';
@@ -201,10 +118,10 @@ class _LoginScreenState extends State<LoginScreen>
       } else if (e.code == 'network_error') {
         errorMessage = 'Network error. Please check your internet connection.';
       } else if (e.code == 'sign_in_canceled') {
-        if (mounted) setState(() => _loading = false);
         return;
       } else {
-        errorMessage = 'Google sign-in error. Please try again or use Email/Password login.';
+        errorMessage =
+            'Google sign-in error. Please try again or use Email/Password login.';
       }
 
       if (!mounted) return;
@@ -216,10 +133,11 @@ class _LoginScreenState extends State<LoginScreen>
         ),
       );
     } catch (e) {
-      if (mounted) setState(() => _loading = false);
       if (!mounted) return;
       AppErrorHandler.log('LoginGoogle', e);
       AppErrorHandler.show(context, e);
+    } finally {
+      if (mounted) setState(() => _loading = false);
     }
   }
 

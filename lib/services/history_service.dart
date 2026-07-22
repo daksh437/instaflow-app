@@ -53,6 +53,11 @@ class HistoryService {
             }).toList());
   }
 
+  /// Alias for unified naming across AI tools pages.
+  Stream<List<Map<String, dynamic>>> getHistoryByToolType(String toolType) {
+    return getHistoryByService(toolType);
+  }
+
   /// Get all history
   Stream<List<Map<String, dynamic>>> getAllHistory() {
     final user = _auth.currentUser;

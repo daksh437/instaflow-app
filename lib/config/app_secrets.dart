@@ -35,28 +35,6 @@ class AppSecrets {
     defaultValue: 'https://insta-flow-backend.onrender.com',
   );
 
-  /// WhatsApp Bot REST API base (connect, chats, send message).
-  /// Defaults to the same host as the main backend; override with
-  /// `--dart-define=WHATSAPP_BOT_API_BASE_URL=https://...`
-  static const String whatsappBotApiBaseUrl = String.fromEnvironment(
-    'WHATSAPP_BOT_API_BASE_URL',
-    defaultValue: 'https://insta-flow-backend.onrender.com',
-  );
-
-  /// Meta (Facebook) App ID for WhatsApp Business OAuth WebView flow.
-  /// Set in Meta Developer App → Settings → Basic, or via:
-  /// `--dart-define=META_FACEBOOK_APP_ID=1234567890`
-  static const String metaFacebookAppId = String.fromEnvironment(
-    'META_FACEBOOK_APP_ID',
-    defaultValue: 'YOUR_FACEBOOK_APP_ID',
-  );
-
-  /// Must match a Valid OAuth Redirect URI in the Meta app and the backend route GET /auth/callback.
-  static const String metaFacebookOAuthRedirectUri = String.fromEnvironment(
-    'META_FACEBOOK_OAUTH_REDIRECT_URI',
-    defaultValue: 'https://insta-flow-backend.onrender.com/auth/callback',
-  );
-
   /// ElevenLabs API Key for AI voice (text-to-speech).
   /// Set via --dart-define=ELEVENLABS_API_KEY=your_key when running/building.
   static const String elevenLabsApiKey = String.fromEnvironment(

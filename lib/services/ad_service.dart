@@ -7,12 +7,13 @@ import '../models/user_model.dart';
 import 'analytics_service.dart';
 
 /// AdMob Service - Manages banner, interstitial and rewarded ads
-/// Production-ready service with proper user segmentation and session tracking
+/// Production-ready service with proper user segmentation
 /// 
 /// Rules:
 /// - Show ads for: new users, trial users, free users (after trial), any non-premium.
 /// - Do NOT show ads only when: user.isPremium == true AND premiumExpiry is in the future.
 /// - Payment flow: NO ads (disabled during checkout).
+/// - Interstitial: after each successful AI generation for non-premium users.
 class AdService {
   static final AdService _instance = AdService._internal();
   factory AdService() => _instance;
@@ -41,10 +42,9 @@ class AdService {
     }
   }
   
-  /// Reset session tracking (call on app start)
+  /// No-op kept for app startup compatibility.
   void resetSession() {
-    _interstitialShownThisSession = false;
-    if (kDebugMode) debugPrint('[AdService] Session reset - interstitial can be shown again');
+    if (kDebugMode) debugPrint('[AdService] Session reset');
   }
 
   BannerAd? _bannerAd;
@@ -53,9 +53,6 @@ class AdService {
   bool _isBannerAdLoaded = false;
   bool _isInterstitialAdLoaded = false;
   bool _isRewardedAdLoaded = false;
-  
-  // Session tracking: Max 1 interstitial per app session
-  bool _interstitialShownThisSession = false;
   
   // Flag to prevent ads during payment flow
   bool _isPaymentFlowActive = false;
@@ -131,12 +128,6 @@ class AdService {
       if (_isInterstitialAdLoaded || _interstitialAd != null) {
         return;
       }
-      
-      // Don't load if already shown this session
-      if (_interstitialShownThisSession) {
-        if (kDebugMode) debugPrint('[AdService] Skipping interstitial load - already shown this session');
-        return;
-      }
 
       if (kDebugMode) debugPrint('[AdService] Loading interstitial ad...');
       await InterstitialAd.load(
@@ -164,21 +155,13 @@ class AdService {
 
   /// Show interstitial ad (non-blocking, fails gracefully)
   /// Rules:
-  /// - Only for free/trial users
+  /// - Only for non-premium users (trial + free)
   /// - Never during payment flow
-  /// - Max 1 per app session
   /// - Never blocks UI while loading
   Future<bool> showInterstitialAd() async {
     try {
-      // Never show during payment flow
       if (_isPaymentFlowActive) {
         if (kDebugMode) debugPrint('[AdService] Skipping interstitial - payment flow active');
-        return false;
-      }
-      
-      // Max 1 per session
-      if (_interstitialShownThisSession) {
-        if (kDebugMode) debugPrint('[AdService] Skipping interstitial - already shown this session');
         return false;
       }
       
@@ -212,8 +195,7 @@ class AdService {
           ad.dispose();
           _interstitialAd = null;
           _isInterstitialAdLoaded = false;
-          _interstitialShownThisSession = true; // Mark as shown this session
-          loadInterstitialAd(); // Preload next ad
+          loadInterstitialAd();
         },
         onAdFailedToShowFullScreenContent: (InterstitialAd ad, AdError error) {
           if (kDebugMode) debugPrint('[AdService] ❌ Interstitial ad failed to show: $error');
@@ -225,7 +207,6 @@ class AdService {
       );
 
       await interstitialAd.show();
-      _interstitialShownThisSession = true; // Mark immediately when showing
       return true;
     } catch (e) {
       if (kDebugMode) debugPrint('[AdService] ❌ Error showing interstitial ad: $e');
@@ -414,7 +395,6 @@ class AdService {
     _isBannerAdLoaded = false;
     _isInterstitialAdLoaded = false;
     _isRewardedAdLoaded = false;
-    _interstitialShownThisSession = false;
     _isPaymentFlowActive = false;
     if (kDebugMode) debugPrint('[AdService] All ads disposed and state reset');
   }

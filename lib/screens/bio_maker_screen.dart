@@ -1,13 +1,30 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../widgets/ai_ad_banner.dart';
 import 'package:flutter/services.dart';
 import '../services/ai_service.dart';
+import '../services/analytics_service.dart';
 import '../services/ai_usage_control_service.dart';
 import '../services/history_service.dart';
 import '../utils/ai_usage_guard.dart';
+import '../utils/app_error_handler.dart';
 import '../widgets/ai_credit_badge.dart';
 import '../widgets/ai_plan_countdown.dart';
+import '../widgets/ai_progressive_loading.dart';
 import 'history_screen.dart';
+
+class _BioQuickTopic {
+  const _BioQuickTopic(this.label, this.text);
+  final String label;
+  final String text;
+}
+
+const List<_BioQuickTopic> _kBioQuickTopics = [
+  _BioQuickTopic('Fitness coach', 'Fitness coach helping busy people train at home — DM for plans'),
+  _BioQuickTopic('Skincare', 'Skincare enthusiast • glow tips • honest reviews'),
+  _BioQuickTopic('Cafe owner', 'Neighborhood cafe • fresh coffee & weekend brunch • City name'),
+  _BioQuickTopic('Creator', 'Content creator • tech & productivity • collabs open'),
+];
 
 class BioMakerScreen extends StatefulWidget {
   const BioMakerScreen({super.key});
@@ -81,6 +98,8 @@ class _BioMakerScreenState extends State<BioMakerScreen> {
         _isGenerating = false;
       });
 
+      AnalyticsService.logAiToolUsed(toolId: 'bio_maker');
+
       // Save to history
       if (_bios.isNotEmpty) {
         final allBios = _bios.entries.map((e) => '${e.key}: ${e.value}').join('\n\n');
@@ -95,27 +114,21 @@ class _BioMakerScreenState extends State<BioMakerScreen> {
       if (kDebugMode) debugPrint('[BioMaker] ❌ Error: $e');
       setState(() => _isGenerating = false);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            e.toString().contains('unavailable') || e.toString().contains('Failed')
-                ? 'AI service error: ${e.toString()}'
-                : 'Error generating bio: ${e.toString()}',
-          ),
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 5),
-        ),
-      );
+      await AppErrorHandler.log('BioMaker', e);
+      if (!mounted) return;
+      AppErrorHandler.show(context, e);
     }
   }
 
-  void _copyToClipboard(String text) {
-    Clipboard.setData(ClipboardData(text: text));
+  Future<void> _copyToClipboard(String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    await AnalyticsService.logFirstAiResultCopiedOnce(toolId: 'bio_maker');
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Bio copied!'),
+        content: Text('Copied — paste in Instagram.'),
         backgroundColor: Color(0xFF7B2CBF),
-        duration: Duration(seconds: 1),
+        behavior: SnackBarBehavior.floating,
       ),
     );
   }
@@ -303,6 +316,7 @@ class _BioMakerScreenState extends State<BioMakerScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      bottomNavigationBar: const AiAdBanner(),
       backgroundColor: Colors.white,
       appBar: AppBar(
         title: const Text('Bio Maker'),
@@ -374,7 +388,43 @@ class _BioMakerScreenState extends State<BioMakerScreen> {
                   contentPadding: const EdgeInsets.all(20),
                 ),
                 style: const TextStyle(fontSize: 16, height: 1.5),
+                onChanged: (_) => setState(() {}),
               ),
+            ),
+
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Quick ideas',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey[800],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: _kBioQuickTopics.map((t) {
+                return ActionChip(
+                  label: Text(t.label),
+                  onPressed: () {
+                    setState(() {
+                      _inputController.text = t.text;
+                    });
+                  },
+                  backgroundColor: Colors.grey[100],
+                  side: BorderSide(color: Colors.grey[300]!),
+                  labelStyle: const TextStyle(
+                    fontSize: 13,
+                    color: Color(0xFF4A148C),
+                    fontWeight: FontWeight.w500,
+                  ),
+                );
+              }).toList(),
             ),
 
             const SizedBox(height: 24),
@@ -411,13 +461,27 @@ class _BioMakerScreenState extends State<BioMakerScreen> {
                           ),
                         ),
                         child: _isGenerating
-                            ? const SizedBox(
-                                height: 24,
-                                width: 24,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
+                            ? const Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  SizedBox(
+                                    height: 22,
+                                    width: 22,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                  SizedBox(width: 12),
+                                  Text(
+                                    'Creating your bios…',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
                               )
                             : Row(
                                 mainAxisAlignment: MainAxisAlignment.center,
@@ -453,19 +517,13 @@ class _BioMakerScreenState extends State<BioMakerScreen> {
                   color: const Color(0xFF7B2CBF).withOpacity(0.05),
                   borderRadius: BorderRadius.circular(24),
                 ),
-                child: Column(
-                  children: [
-                    const CircularProgressIndicator(color: Color(0xFF7B2CBF)),
-                    const SizedBox(height: 16),
-                    Text(
-                      'Crafting perfect bios... ✨',
-                      style: TextStyle(
-                        fontSize: 16,
-                        color: Colors.grey[700],
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
+                child: const AiProgressiveLoading(
+                  messages: [
+                    'Learning about you…',
+                    'Creating your bios…',
+                    'Polishing styles…',
                   ],
+                  accentColor: Color(0xFF7B2CBF),
                 ),
               ),
             ],
@@ -608,6 +666,26 @@ class _BioMakerScreenState extends State<BioMakerScreen> {
                             fontSize: 16,
                             height: 1.6,
                             color: Color(0xFF1A1A1A),
+                          ),
+                        ),
+                        const SizedBox(height: 16),
+                        SizedBox(
+                          width: double.infinity,
+                          child: FilledButton.icon(
+                            onPressed: () => _copyToClipboard(_bios[_selectedType] ?? ''),
+                            icon: const Icon(Icons.copy_all_rounded, size: 22),
+                            label: const Text(
+                              'Copy bio',
+                              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                            ),
+                            style: FilledButton.styleFrom(
+                              backgroundColor: const Color(0xFF7B2CBF),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(14),
+                              ),
+                            ),
                           ),
                         ),
                       ],

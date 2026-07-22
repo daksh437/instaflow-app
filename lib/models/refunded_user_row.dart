@@ -18,6 +18,13 @@ class RefundedUserRow {
   final DateTime? revokedAt;
   final String? reason;
 
+  /// Email to show in the admin UI — falls back to uid (never blank).
+  String get emailDisplay {
+    if (email.trim().isNotEmpty) return email.trim();
+    if (uid.trim().isNotEmpty) return uid.trim();
+    return 'No email';
+  }
+
   static RefundedUserRow fromDoc(DocumentSnapshot doc) {
     final d = doc.data() as Map<String, dynamic>? ?? {};
     DateTime? purchaseDate;

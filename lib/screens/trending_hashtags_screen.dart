@@ -1,13 +1,20 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../widgets/ai_ad_banner.dart';
 import 'package:flutter/services.dart';
 import '../services/ai_service.dart';
+import '../services/analytics_service.dart';
 import '../services/ai_usage_control_service.dart';
 import '../services/history_service.dart';
 import '../utils/ai_usage_guard.dart';
+import '../utils/app_error_handler.dart';
 import '../widgets/ai_credit_badge.dart';
-import '../widgets/ai_plan_countdown.dart';
+import '../widgets/ai_progressive_loading.dart';
+import '../widgets/ai_coach_card.dart';
+import '../models/ai_advice_model.dart';
 import 'history_screen.dart';
+
+const List<String> _kQuickCategories = ['Fashion', 'Food', 'Fitness', 'Travel'];
 
 class TrendingHashtagsScreen extends StatefulWidget {
   const TrendingHashtagsScreen({super.key});
@@ -23,6 +30,7 @@ class _TrendingHashtagsScreenState extends State<TrendingHashtagsScreen> {
   List<String> _trendingTopics = [];
   List<String> _trendingIdeas = [];
   final Map<String, List<String>> _nicheHashtags = {};
+  AiAdviceModel? _advice;
   String _selectedCategory = 'All';
   bool _isLoading = false;
   bool _hasLoaded = false;
@@ -61,12 +69,21 @@ class _TrendingHashtagsScreenState extends State<TrendingHashtagsScreen> {
       _trendingHashtags = List<String>.from(trends['hashtags'] ?? []);
       _trendingTopics = List<String>.from(trends['topics'] ?? []);
       _trendingIdeas = List<String>.from(trends['ideas'] ?? []);
+      final adviceRaw = trends['ai_advice'];
+      _advice = adviceRaw is Map
+          ? (() {
+              final m = AiAdviceModel.fromMap(Map<String, dynamic>.from(adviceRaw));
+              return m.isUsable ? m : null;
+            })()
+          : null;
       if (_selectedCategory != 'All') {
         _nicheHashtags[_selectedCategory] = _trendingHashtags;
       }
       _isLoading = false;
       _hasLoaded = true;
     });
+
+    AnalyticsService.logAiToolUsed(toolId: 'trending_hashtags');
 
     if (_trendingHashtags.isNotEmpty || _trendingTopics.isNotEmpty || _trendingIdeas.isNotEmpty) {
       final output = 'Hashtags: ${_trendingHashtags.join(", ")}\n\nTopics: ${_trendingTopics.join(", ")}\n\nIdeas: ${_trendingIdeas.join(", ")}';
@@ -84,16 +101,11 @@ class _TrendingHashtagsScreenState extends State<TrendingHashtagsScreen> {
     }
     } catch (e) {
       if (kDebugMode) debugPrint('[TrendFinder] ❌ Error loading trends: $e');
-      if (mounted) {
-        setState(() => _isLoading = false);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('Error loading trends: ${e.toString()}'),
-            backgroundColor: Colors.red,
-            duration: const Duration(seconds: 3),
-          ),
-        );
-      }
+      if (!mounted) return;
+      setState(() => _isLoading = false);
+      await AppErrorHandler.log('TrendingHashtags', e);
+      if (!mounted) return;
+      AppErrorHandler.show(context, e);
     }
   }
 
@@ -101,25 +113,40 @@ class _TrendingHashtagsScreenState extends State<TrendingHashtagsScreen> {
     await _loadTrendsWithGuard();
   }
 
-  void _copyToClipboard(String text) {
-    Clipboard.setData(ClipboardData(text: text));
+  Future<void> _copyToClipboard(String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    await AnalyticsService.logFirstAiResultCopiedOnce(toolId: 'trending_hashtags');
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Copied to clipboard!'),
+        content: Text('Copied — paste in Instagram.'),
         backgroundColor: Color(0xFF7B2CBF),
         behavior: SnackBarBehavior.floating,
       ),
     );
   }
 
-  void _copyAll() {
+  Future<void> _copyAll() async {
     final allTags = _trendingHashtags.join(' ');
-    _copyToClipboard(allTags);
+    await _copyToClipboard(allTags);
+  }
+
+  void _applyAdvice() {
+    if (_advice == null) return;
+    final step = _advice!.actionSteps.first.toLowerCase();
+    if (step.contains('carousel')) {
+      _onCategoryChanged('Education');
+    }
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Applied AI trend suggestion.')),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      bottomNavigationBar: const AiAdBanner(),
       backgroundColor: Colors.white,
       appBar: AppBar(
         title: const Text('Trend Finder'),
@@ -173,6 +200,49 @@ class _TrendingHashtagsScreenState extends State<TrendingHashtagsScreen> {
             valueListenable: AiUsageControlService.instance.state,
             builder: (_, state, __) => AiFreeLimitBanner(state: state, onUpgrade: () => Navigator.pushNamed(context, '/premium')),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Quick ideas',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: Colors.grey[800],
+                  ),
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 8,
+                  runSpacing: 8,
+                  children: _kQuickCategories.map((cat) {
+                    return ActionChip(
+                      label: Text(cat),
+                      onPressed: _isLoading ? null : () => _onCategoryChanged(cat),
+                      backgroundColor: _selectedCategory == cat
+                          ? const Color(0xFF7B2CBF).withOpacity(0.15)
+                          : Colors.grey[100],
+                      side: BorderSide(
+                        color: _selectedCategory == cat
+                            ? const Color(0xFF7B2CBF)
+                            : Colors.grey[300]!,
+                      ),
+                      labelStyle: TextStyle(
+                        fontSize: 13,
+                        color: _selectedCategory == cat
+                            ? const Color(0xFF7B2CBF)
+                            : const Color(0xFF4A148C),
+                        fontWeight: FontWeight.w600,
+                      ),
+                    );
+                  }).toList(),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 8),
           // Category Filter
           Container(
             height: 60,
@@ -204,20 +274,23 @@ class _TrendingHashtagsScreenState extends State<TrendingHashtagsScreen> {
           Expanded(
             child: _isLoading && !_hasLoaded
                 ? Center(
-                    child: Column(
-                      mainAxisAlignment: MainAxisAlignment.center,
-                      children: [
-                        const CircularProgressIndicator(color: Color(0xFF7B2CBF)),
-                        const SizedBox(height: 16),
-                        Text(
-                          'Finding latest trends... ✨',
-                          style: TextStyle(
-                            fontSize: 16,
-                            color: Colors.grey[700],
-                            fontWeight: FontWeight.w500,
-                          ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(24),
+                      child: Container(
+                        padding: const EdgeInsets.all(32),
+                        decoration: BoxDecoration(
+                          color: const Color(0xFF7B2CBF).withOpacity(0.05),
+                          borderRadius: BorderRadius.circular(24),
                         ),
-                      ],
+                        child: const AiProgressiveLoading(
+                          messages: [
+                            'Scanning trends…',
+                            'Finding hashtags…',
+                            'Almost ready…',
+                          ],
+                          accentColor: Color(0xFF7B2CBF),
+                        ),
+                      ),
                     ),
                   )
                 : SingleChildScrollView(
@@ -225,6 +298,15 @@ class _TrendingHashtagsScreenState extends State<TrendingHashtagsScreen> {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
+                        // AI Coach suggestion (scrolls with content to avoid
+                        // pushing the fixed header into a bottom overflow).
+                        if (_advice != null) ...[
+                          AiCoachCard(
+                            advice: _advice!,
+                            onApply: _applyAdvice,
+                          ),
+                          const SizedBox(height: 16),
+                        ],
                         // Trending Hashtags Section
                         Row(
                           mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -246,7 +328,7 @@ class _TrendingHashtagsScreenState extends State<TrendingHashtagsScreen> {
                               Padding(
                                 padding: const EdgeInsets.only(left: 8),
                                 child: TextButton.icon(
-                                  onPressed: _copyAll,
+                                  onPressed: _isLoading ? null : _copyAll,
                                   icon: const Icon(Icons.copy_all, size: 16),
                                   label: const Text('Copy All', style: TextStyle(fontSize: 13)),
                                   style: TextButton.styleFrom(
@@ -259,6 +341,28 @@ class _TrendingHashtagsScreenState extends State<TrendingHashtagsScreen> {
                               ),
                           ],
                         ),
+                        if (_trendingHashtags.isNotEmpty) ...[
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton.icon(
+                              onPressed: _isLoading ? null : _copyAll,
+                              icon: const Icon(Icons.copy_all_rounded, size: 22),
+                              label: const Text(
+                                'Copy all hashtags',
+                                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                              ),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFF7B2CBF),
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(vertical: 14),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ],
                         const SizedBox(height: 16),
 
                         // Hashtag Bubbles

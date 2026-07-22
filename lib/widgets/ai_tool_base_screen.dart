@@ -1,16 +1,25 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
-import 'package:firebase_auth/firebase_auth.dart';
 import '../services/ai_service.dart';
 import '../services/ai_usage_control_service.dart';
+import '../services/analytics_service.dart';
 import '../services/history_service.dart';
 import '../services/voice_service.dart';
 import '../utils/ai_usage_guard.dart';
 import '../utils/app_error_handler.dart';
 import '../screens/history_screen.dart';
-import 'ai_plan_countdown.dart';
 import 'ai_progressive_loading.dart';
 import 'voice_play_button.dart';
+import 'ai_unified_components.dart';
+
+final Map<String, String> _lastAiResultByTool = <String, String>{};
+
+/// Optional preset for [AIToolBaseScreen.quickIdeas] chips.
+class AiToolQuickIdea {
+  const AiToolQuickIdea({required this.label, required this.text});
+  final String label;
+  final String text;
+}
 
 class AIToolBaseScreen extends StatefulWidget {
   const AIToolBaseScreen({
@@ -20,6 +29,12 @@ class AIToolBaseScreen extends StatefulWidget {
     required this.onGenerate,
     this.icon = Icons.auto_awesome,
     this.serviceType,
+    this.analyticsToolId,
+    this.quickIdeas,
+    this.emptyFieldSnackText = 'Type or tap a quick idea below.',
+    this.generatingButtonLabel = 'Generating magic... ✨',
+    this.progressiveLoadingMessages,
+    this.prominentCopy = false,
   });
 
   final String title;
@@ -27,6 +42,14 @@ class AIToolBaseScreen extends StatefulWidget {
   final Future<String> Function(String) onGenerate;
   final IconData icon;
   final String? serviceType;
+  /// When set, logs [AnalyticsService.logAiToolUsed] on success and copy analytics.
+  final String? analyticsToolId;
+  final List<AiToolQuickIdea>? quickIdeas;
+  final String emptyFieldSnackText;
+  final String generatingButtonLabel;
+  final List<String>? progressiveLoadingMessages;
+  /// Full-width copy button under the output text (hide small Copy chip when true).
+  final bool prominentCopy;
 
   @override
   State<AIToolBaseScreen> createState() => _AIToolBaseScreenState();
@@ -48,6 +71,11 @@ class _AIToolBaseScreenState extends State<AIToolBaseScreen>
       duration: const Duration(milliseconds: 1500),
     )..repeat();
     AiUsageControlService.instance.refresh();
+    final key = widget.serviceType ?? widget.title;
+    final cached = _lastAiResultByTool[key];
+    if (cached != null && cached.trim().isNotEmpty) {
+      _generatedOutputs = [cached];
+    }
   }
 
   @override
@@ -61,49 +89,97 @@ class _AIToolBaseScreenState extends State<AIToolBaseScreen>
   Future<void> _generate() async {
     if (_inputController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter some input')),
+        SnackBar(
+          content: Text(widget.emptyFieldSnackText),
+          backgroundColor: Colors.orange,
+        ),
       );
       return;
     }
 
-    final result = await runWithBackendAiGuard<String>(
-      context,
-      onGenerate: () async {
-        setState(() => _isGenerating = true);
-        VoiceService().stop();
-        try {
-          final inputText = _inputController.text;
-          final output = await widget.onGenerate(inputText);
-          await AiUsageControlService.instance.refresh();
-          if (!mounted) return output;
-          setState(() {
-            _generatedOutputs.insert(0, output);
-            _isGenerating = false;
-          });
-          final serviceType = widget.serviceType;
-          if (serviceType != null && output.isNotEmpty) {
-            await _historyService.saveHistory(
-              serviceType: serviceType,
-              input: inputText,
-              output: output,
-            );
+    try {
+      final result = await runWithBackendAiGuard<String>(
+        context,
+        onGenerate: () async {
+          setState(() => _isGenerating = true);
+          VoiceService().stop();
+          try {
+            final inputText = _inputController.text;
+            final output = await widget.onGenerate(inputText);
+            await AiUsageControlService.instance.refresh();
+            if (!mounted) return output;
+            setState(() {
+              _generatedOutputs.insert(0, output);
+              _isGenerating = false;
+            });
+            final key = widget.serviceType ?? widget.title;
+            _lastAiResultByTool[key] = output;
+            final tid = widget.analyticsToolId;
+            if (tid != null && output.isNotEmpty) {
+              AnalyticsService.logAiToolUsed(toolId: tid);
+            }
+            final serviceType = widget.serviceType;
+            if (serviceType != null && output.isNotEmpty) {
+              await _historyService.saveHistory(
+                serviceType: serviceType,
+                input: inputText,
+                output: output,
+              );
+              if (!mounted) return output;
+            }
+            return output;
+          } catch (e) {
+            setState(() => _isGenerating = false);
+            rethrow;
           }
-          return output;
-        } catch (e) {
-          setState(() => _isGenerating = false);
-          rethrow;
+        },
+        limitReachedMessage: 'This AI feature requires a premium subscription. Upgrade now to unlock all AI tools!',
+        service: AiUsageControlService.instance,
+      );
+      if (result == null && mounted) setState(() => _isGenerating = false);
+    } catch (e) {
+      if (!mounted) return;
+      await AppErrorHandler.log('AIToolBaseScreen', e);
+      final fallback = _buildFallbackOutput(_inputController.text.trim());
+      setState(() {
+        _isGenerating = false;
+        if (fallback.isNotEmpty) {
+          _generatedOutputs.insert(0, fallback);
+          final key = widget.serviceType ?? widget.title;
+          _lastAiResultByTool[key] = fallback;
         }
-      },
-      limitReachedMessage: 'This AI feature requires a premium subscription. Upgrade now to unlock all AI tools!',
-      service: AiUsageControlService.instance,
-    );
-    if (result == null && mounted) setState(() => _isGenerating = false);
+      });
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('AI is taking longer than usual, showing best available result.'),
+          backgroundColor: Color(0xFF7B2CBF),
+        ),
+      );
+    }
   }
 
-  void _copyToClipboard(String text) {
-    Clipboard.setData(ClipboardData(text: text));
+  String _buildFallbackOutput(String input) {
+    final topic = input.isNotEmpty ? input : 'your topic';
+    return 'Starter output for $topic:\n\n'
+        '1) Strong hook line to stop scrolling.\n'
+        '2) One clear value point for audience.\n'
+        '3) Action-oriented CTA.\n\n'
+        'Use this as a baseline and regenerate for a refined version.';
+  }
+
+  Future<void> _copyToClipboard(String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    final tid = widget.analyticsToolId;
+    if (tid != null) {
+      await AnalyticsService.logFirstAiResultCopiedOnce(toolId: tid);
+    }
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Copied to clipboard!')),
+      const SnackBar(
+        content: Text('Copied — paste in Instagram.'),
+        backgroundColor: Color(0xFF7B2CBF),
+        behavior: SnackBarBehavior.floating,
+      ),
     );
   }
 
@@ -194,6 +270,38 @@ class _AIToolBaseScreenState extends State<AIToolBaseScreen>
     });
   }
 
+  Future<void> _boostGenerate() async {
+    final base = _inputController.text.trim();
+    if (base.isEmpty || _isGenerating) return;
+    final boosted = '$base\n\nMake it more viral. Strengthen hook, emotion, clarity and CTA.';
+    _inputController.text = boosted;
+    _inputController.selection = TextSelection.collapsed(offset: boosted.length);
+    await _generate();
+    if (!mounted) return;
+    _inputController.text = base;
+    _inputController.selection = TextSelection.collapsed(offset: base.length);
+  }
+
+  void _openSmartLink(String route) {
+    if (!mounted) return;
+    Navigator.pushNamed(context, route);
+  }
+
+  String? _smartLinkRouteForPrimaryAction() {
+    final st = (widget.serviceType ?? '').toLowerCase();
+    if (st.contains('reel') || st.contains('script')) return '/schedule-post';
+    if (st.contains('caption')) return '/hashtags';
+    if (st.contains('idea')) return '/reels-script-writer';
+    return null;
+  }
+
+  String? _smartLinkRouteForSecondaryAction() {
+    final st = (widget.serviceType ?? '').toLowerCase();
+    if (st.contains('caption')) return '/hashtags';
+    if (st.contains('idea')) return '/reels-script-writer';
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
@@ -245,109 +353,85 @@ class _AIToolBaseScreenState extends State<AIToolBaseScreen>
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            // Input Section
-            TextField(
+            AiInputCard(
               controller: _inputController,
-              maxLines: 5,
-              decoration: InputDecoration(
-                hintText: widget.hintText,
-                border: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(20),
-                  borderSide: BorderSide(color: (Colors.grey[300] ?? Colors.grey)),
-                ),
-                enabledBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(20),
-                  borderSide: BorderSide(color: (Colors.grey[300] ?? Colors.grey)),
-                ),
-                focusedBorder: OutlineInputBorder(
-                  borderRadius: BorderRadius.circular(20),
-                  borderSide: const BorderSide(color: Color(0xFF7B2CBF), width: 2),
-                ),
-                filled: true,
-                fillColor: Colors.grey[50],
-                contentPadding: const EdgeInsets.all(20),
-              ),
-              style: const TextStyle(fontSize: 16, height: 1.5),
+              hintText: widget.hintText,
+              quickIdeas: (widget.quickIdeas ?? const [])
+                  .map((q) => AiSuggestionChip(label: q.label, text: q.text))
+                  .toList(),
+              onChanged: (_) => setState(() {}),
             ),
 
             const SizedBox(height: 16),
 
-            // Generate Button with Gradient
-            Container(
-              decoration: BoxDecoration(
-                gradient: const LinearGradient(
-                  colors: [Color(0xFF7B2CBF), Color(0xFF9D4EDD)],
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                ),
-                borderRadius: BorderRadius.circular(20),
-                boxShadow: [
-                  BoxShadow(
-                    color: const Color(0xFF7B2CBF).withOpacity(0.3),
-                    blurRadius: 8,
-                    offset: const Offset(0, 4),
+            Center(
+              child: Container(
+                width: double.infinity,
+                margin: const EdgeInsets.symmetric(horizontal: 8),
+                decoration: BoxDecoration(
+                  gradient: const LinearGradient(
+                    colors: [Color(0xFF7B2CBF), Color(0xFF9D4EDD)],
                   ),
-                ],
-              ),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  ElevatedButton(
+                  borderRadius: BorderRadius.circular(18),
+                  boxShadow: [
+                    BoxShadow(
+                      color: const Color(0xFF7B2CBF).withValues(alpha: 0.28),
+                      blurRadius: 12,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: AiTapScale(
+                  child: ElevatedButton(
                     onPressed: _isGenerating ? null : _generate,
                     style: ElevatedButton.styleFrom(
                       backgroundColor: Colors.transparent,
                       foregroundColor: Colors.white,
                       shadowColor: Colors.transparent,
-                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      padding: const EdgeInsets.symmetric(vertical: 18),
                       shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(20),
+                        borderRadius: BorderRadius.circular(18),
                       ),
-                      elevation: 0,
                     ),
-                    child: _isGenerating
-                        ? const Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              SizedBox(
-                                width: 20,
-                                height: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
-                              ),
-                              SizedBox(width: 12),
-                              Text('Generating magic... ✨'),
-                            ],
-                          )
-                        : Row(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(widget.icon, size: 20),
-                              const SizedBox(width: 8),
-                              const Text('Generate', style: TextStyle(fontSize: 16)),
-                            ],
-                          ),
+                    child: Text(
+                      _isGenerating ? widget.generatingButtonLabel : '✨ Generate',
+                      style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w800),
+                    ),
                   ),
-                ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 10),
+            AiTapScale(
+              child: OutlinedButton.icon(
+                onPressed: _isGenerating ? null : _boostGenerate,
+                icon: const Icon(Icons.flash_on_rounded),
+                label: const Text('✨ Make it more viral'),
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: const Color(0xFF7B2CBF),
+                  side: BorderSide(color: const Color(0xFF7B2CBF).withValues(alpha: 0.35)),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                ),
               ),
             ),
 
             // Loading Animation - progressive text + progress bar
             if (_isGenerating) ...[
               const SizedBox(height: 24),
-              Container(
-                padding: const EdgeInsets.all(24),
-                decoration: BoxDecoration(
-                  color: const Color(0xFF7B2CBF).withOpacity(0.05),
-                  borderRadius: BorderRadius.circular(20),
-                ),
-                child: const AiProgressiveLoading(
-                  messages: ['Analyzing…', 'Generating…', 'Optimizing output…'],
-                  accentColor: Color(0xFF7B2CBF),
-                ),
+              AiLoadingState(
+                messages: widget.progressiveLoadingMessages ??
+                    const [
+                      'Analyzing your input...',
+                      'Generating high-quality output...',
+                      'Optimizing for engagement...',
+                    ],
+              ),
+            ],
+            if (!_isGenerating && _generatedOutputs.isEmpty) ...[
+              const SizedBox(height: 24),
+              const AiEmptyState(
+                title: 'No output yet',
+                subtitle: 'Generate once and your premium AI result cards will appear here.',
               ),
             ],
 
@@ -379,42 +463,42 @@ class _AIToolBaseScreenState extends State<AIToolBaseScreen>
             // Output Cards
             ..._generatedOutputs.map((output) => Padding(
                   padding: const EdgeInsets.only(bottom: 16),
-                  child: _OutputCard(
-                    output: output,
-                    onCopy: () => _copyToClipboard(output),
-                    onRegenerate: () => _regenerate(output),
-                    onMakeShort: () => _makeShort(output),
-                    onMakeLong: () => _makeLong(output),
-                    onAddEmojis: () => _addEmojis(output),
-                    onAddHashtags: () => _addHashtags(output),
-                    onCreateAnotherStyle: () => _createAnotherStyle(output),
-                    serviceType: widget.serviceType,
-                    onSave: widget.serviceType != null
-                        ? () async {
-                            try {
-                              final st = widget.serviceType;
-                              if (st == null) return;
-                              await _historyService.saveHistory(
-                                serviceType: st,
-                                input: _inputController.text,
-                                output: output,
-                              );
-                              if (mounted) {
+                  child: AiResultCard(
+                    title: 'AI Result',
+                    mainResult: output,
+                    actions: AiActionBar(
+                      onCopy: () => _copyToClipboard(output),
+                      onRegenerate: () => _regenerate(output),
+                      onSchedule: _smartLinkRouteForPrimaryAction() != null
+                          ? () => _openSmartLink(_smartLinkRouteForPrimaryAction()!)
+                          : null,
+                      onShare: _smartLinkRouteForSecondaryAction() != null
+                          ? () => _openSmartLink(_smartLinkRouteForSecondaryAction()!)
+                          : null,
+                      onSave: widget.serviceType != null
+                          ? () async {
+                              try {
+                                final st = widget.serviceType;
+                                if (st == null) return;
+                                await _historyService.saveHistory(
+                                  serviceType: st,
+                                  input: _inputController.text,
+                                  output: output,
+                                );
+                                if (!context.mounted) return;
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
                                     content: Text('Saved to history!'),
                                     backgroundColor: Color(0xFF7B2CBF),
                                   ),
                                 );
-                              }
-                            } catch (e) {
-                              if (mounted) {
+                              } catch (e) {
+                                if (!context.mounted) return;
                                 AppErrorHandler.log('AIToolBaseSaveHistory', e);
-                                AppErrorHandler.show(context, e);
                               }
                             }
-                          }
-                        : null,
+                          : null,
+                    ),
                   ),
                 )),
           ],
@@ -427,6 +511,7 @@ class _AIToolBaseScreenState extends State<AIToolBaseScreen>
 class _OutputCard extends StatelessWidget {
   const _OutputCard({
     required this.output,
+    this.prominentCopy = false,
     required this.onCopy,
     required this.onRegenerate,
     required this.onMakeShort,
@@ -439,6 +524,7 @@ class _OutputCard extends StatelessWidget {
   });
 
   final String output;
+  final bool prominentCopy;
   final VoidCallback onCopy;
   final VoidCallback onRegenerate;
   final VoidCallback onMakeShort;
@@ -483,6 +569,22 @@ class _OutputCard extends StatelessWidget {
                   fontWeight: FontWeight.w400,
                 ),
               ),
+            if (prominentCopy) ...[
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: onCopy,
+                  icon: const Icon(Icons.copy, size: 20),
+                  label: const Text('Copy reply'),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF7B2CBF),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                  ),
+                ),
+              ),
+            ],
             const SizedBox(height: 16),
             const Divider(),
             const SizedBox(height: 12),
@@ -500,11 +602,12 @@ class _OutputCard extends StatelessWidget {
                     label: 'Save',
                     onPressed: onSave!,
                   ),
-                _ActionButton(
-                  icon: Icons.copy,
-                  label: 'Copy',
-                  onPressed: onCopy,
-                ),
+                if (!prominentCopy)
+                  _ActionButton(
+                    icon: Icons.copy,
+                    label: 'Copy',
+                    onPressed: onCopy,
+                  ),
                 _ActionButton(
                   icon: Icons.refresh,
                   label: 'Regenerate',

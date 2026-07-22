@@ -1,13 +1,16 @@
+import 'dart:async';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/services.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:flutter/foundation.dart';
 import '../models/user_model.dart';
 import '../services/notification_service.dart';
 import '../utils/admin_guard.dart';
+import 'analytics_service.dart';
 import 'premium_service.dart';
 import 'device_service.dart';
 import 'monetization_service.dart';
+import 'play_billing_service.dart';
 
 class AuthService {
   final FirebaseAuth _auth = FirebaseAuth.instance;
@@ -28,8 +31,7 @@ class AuthService {
         password: password,
       );
       if (credential.user != null) {
-        await _ensureUserDocOnLogin(credential.user!);
-        await DeviceService().bindDeviceAfterLogin(credential.user!.uid);
+        await _finalizeLogin(credential.user!);
       }
       return credential;
     } catch (e) {
@@ -52,8 +54,7 @@ class AuthService {
         if (displayName != null) {
           await credential.user!.updateDisplayName(displayName);
         }
-        await _ensureUserDocOnLogin(credential.user!);
-        await DeviceService().bindDeviceAfterLogin(credential.user!.uid);
+        await _finalizeLogin(credential.user!);
       }
 
       return credential;
@@ -64,9 +65,6 @@ class AuthService {
 
   Future<UserCredential?> signInWithGoogle() async {
     try {
-      // Configure GoogleSignIn with proper scopes
-      // Use Web client ID from google-services.json (client_type: 3)
-      // This is the OAuth 2.0 client ID for server-side authentication
       final GoogleSignIn googleSignIn = GoogleSignIn(
         scopes: [
           'email',
@@ -75,17 +73,25 @@ class AuthService {
         serverClientId: '412053319604-4eerf9lfm4mjg3ijfp74tf5q0g0itbi6.apps.googleusercontent.com',
       );
 
-      // Sign out first to clear any cached accounts
       await googleSignIn.signOut();
 
       final GoogleSignInAccount? googleUser = await googleSignIn.signIn();
-      if (googleUser == null) return null; // User cancelled
+      if (googleUser == null) return null;
 
-      final GoogleSignInAuthentication googleAuth =
-          await googleUser.authentication;
+      var googleAuth = await googleUser.authentication;
 
       if (googleAuth.idToken == null) {
-        throw Exception('Failed to get ID token from Google. Please check Firebase Console configuration.');
+        await googleUser.clearAuthCache();
+        googleAuth = await googleUser.authentication;
+        if (googleAuth.idToken == null) {
+          throw PlatformException(
+            code: 'id_token_missing',
+            message: 'ID token not available. This usually means:\n'
+                '1. Release keystore SHA-1 not added in Firebase Console\n'
+                '2. OAuth client not properly configured in Google Cloud Console\n'
+                '3. App needs to be reinstalled after Firebase changes',
+          );
+        }
       }
 
       final credential = GoogleAuthProvider.credential(
@@ -96,8 +102,7 @@ class AuthService {
       final userCredential = await _auth.signInWithCredential(credential);
       final user = userCredential.user;
       if (user != null) {
-        await _ensureUserDocOnLogin(user);
-        await DeviceService().bindDeviceAfterLogin(user.uid);
+        await _finalizeLogin(user);
       }
 
       return userCredential;
@@ -108,14 +113,31 @@ class AuthService {
 
   static DateTime _midnightToday(DateTime d) => DateTime(d.year, d.month, d.day);
 
+  static String _authMethodForUser(User user) {
+    for (final info in user.providerData) {
+      if (info.providerId == 'google.com') return 'google';
+    }
+    return 'email';
+  }
+
+  Future<void> _finalizeLogin(User user) async {
+    final isNewUser = await _ensureUserDocOnLogin(user);
+    await DeviceService().bindDeviceAfterLogin(user.uid);
+    await AnalyticsService.setUserIdentity(user);
+    if (!isNewUser) {
+      AnalyticsService.logLogin(method: _authMethodForUser(user));
+    }
+    unawaited(PlayBillingService().processPendingPurchasesIfAny());
+    unawaited(PlayBillingService().silentRestoreAfterLoginIfNeeded());
+  }
+
   /// Called on every login. Creates user doc on first login with 7-day trial.
-  /// Uses monetization fields: planType, trialEndDate, dailyUsedCount, dailyResetDate.
-  Future<void> _ensureUserDocOnLogin(User user) async {
+  /// Returns true when a new Firestore user doc was created.
+  Future<bool> _ensureUserDocOnLogin(User user) async {
     final userDoc = _firestore.collection('users').doc(user.uid);
     final docSnapshot = await userDoc.get();
 
     final now = DateTime.now();
-    final trialEndDate = now.add(const Duration(days: 7));
     final todayMidnight = _midnightToday(now);
 
     if (!docSnapshot.exists) {
@@ -125,27 +147,36 @@ class AuthService {
         'photoURL': user.photoURL,
         'createdAt': Timestamp.fromDate(now),
         'preferences': {},
-        'planType': 'trial',
-        'trialStartDate': Timestamp.fromDate(now),
-        'trialEndDate': Timestamp.fromDate(trialEndDate),
+        // No free trial — the app is premium-only behind a hard paywall.
+        'planType': 'free',
         'dailyUsedCount': 0,
         'dailyResetDate': Timestamp.fromDate(todayMidnight),
         'premiumExpiry': null,
       }, SetOptions(merge: true));
 
+      final method = _authMethodForUser(user);
+      AnalyticsService.logSignUp(method: method);
+
       final notificationService = NotificationService();
       try {
         await notificationService.initialize();
+        // Persist the FCM token now that a user is signed in — initialize()'s
+        // `_initialized` guard would otherwise skip token setup on this call.
+        await notificationService.syncFcmToken();
         await notificationService.sendWelcomeLocalNotification();
         await notificationService.sendWelcomeNotification(user.uid);
-        await notificationService.sendTrialStartedNotification(user.uid, trialEndDate);
-        await notificationService.scheduleTrialExpiryWarning(trialEndDate);
+        // New users get a 3-day trial (backend sets the exact end on first AI
+        // call; now + 3 days is a close-enough anchor for the reminders).
+        final trialEnd = now.add(const Duration(days: 3));
+        await notificationService.sendTrialStartedNotification(user.uid, trialEnd);
+        await notificationService.scheduleTrialLifecycle(trialEnd);
+        await notificationService.scheduleOnboardingTips();
       } catch (_) {}
-      return;
+      return true;
     }
 
     final data = docSnapshot.data();
-    if (data == null) return;
+    if (data == null) return false;
 
     final trialEnd = (data['trialEnd'] as Timestamp?)?.toDate() ?? (data['trialEndDate'] as Timestamp?)?.toDate();
     if (trialEnd != null && now.isAfter(trialEnd) && (data['planType'] ?? '') == 'trial') {
@@ -160,6 +191,14 @@ class AuthService {
     await PremiumService().checkAndUpdateTrialExpiry(user.uid);
     await PremiumService().checkPremiumExpiry(user.uid);
     await MonetizationService.instance.ensureUserMonetizationFields(user.uid);
+    // Existing user just logged in — make sure their FCM token is on file so
+    // admin push campaigns can reach them.
+    try {
+      final notificationService = NotificationService();
+      await notificationService.initialize();
+      await notificationService.syncFcmToken();
+    } catch (_) {}
+    return false;
   }
 
   Future<UserModel?> getUserData(String uid) async {
@@ -185,4 +224,3 @@ class AuthService {
     await _auth.signOut();
   }
 }
-

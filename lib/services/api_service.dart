@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:async';
 import 'dart:io'; // For SocketException
 import 'dart:math'; // For min() function
+import 'package:flutter/foundation.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:http/http.dart' as http;
 
@@ -9,6 +10,14 @@ import '../config/ai_performance_config.dart';
 import '../utils/ai_access_exception.dart';
 import '../utils/ai_prompt_trim.dart';
 import '../utils/ai_prompt_validation.dart';
+
+/// Server returned 401 from [ApiService.scheduleEvent] / calendar sync (no Google tokens).
+class CalendarNotConnectedException implements Exception {
+  CalendarNotConnectedException([this.message = 'Please connect Google Calendar']);
+  final String message;
+  @override
+  String toString() => message;
+}
 
 class ApiService {
   static final http.Client _sharedClient = http.Client();
@@ -35,7 +44,9 @@ class ApiService {
     // Add user ID header if user is logged in
     if (uid != null) {
       headers['x-user-uid'] = uid;
+      headers['x-user-id'] = uid;
       print('[API] ✅ Header added: x-user-uid = $uid');
+      print('[API] ✅ Header added: x-user-id = $uid');
     } else {
       print('[API] ⚠️ No user ID available - user not logged in');
     }
@@ -84,8 +95,14 @@ class ApiService {
     return out;
   }
 
-  Future<Map<String, dynamic>> _post(String path, Map<String, dynamic> body, {Function(String)? onRetry}) async {
+  Future<Map<String, dynamic>> _post(
+    String path,
+    Map<String, dynamic> body, {
+    Function(String)? onRetry,
+    int? timeoutSeconds,
+  }) async {
     final trimmedBody = _trimBody(body);
+    final timeoutSec = timeoutSeconds ?? AiPerformanceConfig.requestTimeoutSeconds;
     int attempt = 0;
     final requestTimestamp = DateTime.now().millisecondsSinceEpoch;
     print('[API] 🔵 POST Request #$requestTimestamp to: $baseUrl$path');
@@ -101,7 +118,7 @@ class ApiService {
               headers: headers,
               body: requestBodyJson,
             )
-            .timeout(Duration(seconds: AiPerformanceConfig.requestTimeoutSeconds));
+            .timeout(Duration(seconds: timeoutSec));
         
         print('[API] ✅ Response #$requestTimestamp Status: ${res.statusCode}');
         print('[API] 📄 Response Body (first 500 chars): ${res.body.length > 500 ? res.body.substring(0, 500) + "..." : res.body}');
@@ -141,7 +158,7 @@ class ApiService {
           await Future.delayed(Duration(milliseconds: (AiPerformanceConfig.retryBackoffSeconds * 1000).round()));
           continue;
         }
-        throw Exception('TIMEOUT_ERROR: Request timed out after 25 seconds.');
+        throw Exception('TIMEOUT_ERROR: Request timed out after $timeoutSec seconds.');
       } catch (e) {
         print('❌ [API] Error: $e');
         if (e is DailyLimitReachedException) rethrow;
@@ -149,6 +166,18 @@ class ApiService {
       }
     }
   }
+
+  /// Full pipeline: sharpen/enhance image, viral caption, hashtags, engagement + timing hints.
+  Future<Map<String, dynamic>> postAiFullAssist(Map<String, dynamic> body) =>
+      _post('/ai/full-assist', body, timeoutSeconds: 95);
+
+  /// Single viral caption (with optional image context).
+  Future<Map<String, dynamic>> postAiViralCaption(Map<String, dynamic> body) =>
+      _post('/ai/caption', body, timeoutSeconds: 70);
+
+  /// Analyze caption + hashtag draft (distinct from niche `/ai/analyze`).
+  Future<Map<String, dynamic>> postAiAnalyzePost(Map<String, dynamic> body) =>
+      _post('/ai/analyze-post', body, timeoutSeconds: 65);
 
   /// Check AI access (backend is source of truth). Returns allowed, planType, trialDaysLeft, creditsLeftToday.
   ///
@@ -161,6 +190,45 @@ class ApiService {
       return data;
     } catch (e) {
       print('[API] ❌ checkAiAccess failed: $e');
+      rethrow;
+    }
+  }
+
+  /// Server-authoritative premium activation. Sends the Play purchase token; the
+  /// backend verifies with Google Play, enforces one-account-per-purchase, and
+  /// sets premiumExpiry. The client never writes premium fields itself.
+  Future<Map<String, dynamic>> activatePremium({
+    required String purchaseToken,
+    String productId = 'premium_monthly',
+  }) async {
+    try {
+      final data = await _post('/activate-premium', {
+        'purchaseToken': purchaseToken,
+        'productId': productId,
+      });
+      return data;
+    } catch (e) {
+      print('[API] ❌ activatePremium failed: $e');
+      rethrow;
+    }
+  }
+
+  /// Referral: get this user's shareable code (+ count).
+  Future<Map<String, dynamic>> getReferralCode() async {
+    try {
+      return await _get('/referral/code');
+    } catch (e) {
+      print('[API] ❌ getReferralCode failed: $e');
+      rethrow;
+    }
+  }
+
+  /// Referral: redeem a friend's code (both get reward days).
+  Future<Map<String, dynamic>> redeemReferral(String code) async {
+    try {
+      return await _post('/referral/redeem', {'code': code});
+    } catch (e) {
+      print('[API] ❌ redeemReferral failed: $e');
       rethrow;
     }
   }
@@ -919,6 +987,9 @@ CRITICAL REQUIREMENTS:
 
   // Other existing methods remain the same...
 
+  // --- Google Calendar OAuth + external calendar events (not called from UI while feature is gated) ---
+  // TODO: Re-enable from UI after OAuth + verification complete.
+
   Future<String?> getAuthUrl() async {
     // Ensure user is logged in before making request
     final user = FirebaseAuth.instance.currentUser;
@@ -939,19 +1010,80 @@ CRITICAL REQUIREMENTS:
       return false;
     }
     print('[API] ✅ getAuthStatus: User ID: ${user.uid}');
-    final data = await _get('/auth/status');
+    final data = await _get('/calendar/status');
     return data['data']?['connected'] == true;
+  }
+
+  /// Opens in the browser: GET /auth/google?userId= — server redirects to Google OAuth.
+  Uri buildGoogleOAuthLaunchUri() {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      throw StateError('Not signed in');
+    }
+    return Uri.parse('$baseUrl/auth/google').replace(queryParameters: {'userId': user.uid});
+  }
+
+  /// After scheduling a post: add Google Calendar reminder (uses Firestore tokens on server).
+  Future<void> syncCalendarReminderForScheduledPost({
+    required String title,
+    required String description,
+    required DateTime startUtc,
+    required DateTime endUtc,
+  }) async {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) return;
+
+    final headers = _buildHeaders();
+    final timeoutSec = AiPerformanceConfig.requestTimeoutSeconds;
+    final res = await _client
+        .post(
+          Uri.parse('$baseUrl/calendar/create-event'),
+          headers: headers,
+          body: jsonEncode({
+            'title': title,
+            'description': description,
+            'startTime': startUtc.toIso8601String(),
+            'endTime': endUtc.toIso8601String(),
+          }),
+        )
+        .timeout(Duration(seconds: timeoutSec));
+
+    if (res.statusCode == 401) {
+      throw CalendarNotConnectedException();
+    }
+    if (res.statusCode != 200) {
+      String msg = 'Calendar sync failed';
+      try {
+        final j = jsonDecode(res.body) as Map<String, dynamic>?;
+        final err = j?['error'] ?? j?['message'];
+        if (err != null) msg = err.toString();
+      } catch (_) {}
+      throw Exception(msg);
+    }
+    final data = jsonDecode(res.body) as Map<String, dynamic>?;
+    if (data?['success'] != true) {
+      throw Exception(data?['error']?.toString() ?? 'Calendar sync failed');
+    }
   }
 
   Future<String> createCalendarJob({
     required String topic,
     int days = 7,
+    String? tone,
+    String? goal,
   }) async {
     try {
-      final data = await _post('/ai/calendar', {
+      final body = <String, dynamic>{
         'topic': topic,
         'days': days,
-      });
+      };
+      if (tone != null && tone.trim().isNotEmpty) {
+        body['tone'] = tone.trim();
+      }
+      if (goal != null && goal.trim().isNotEmpty) {
+        body['goal'] = goal.trim();
+      }
+      final data = await _post('/ai/calendar', body);
       final jobId = data['jobId'] as String;
       return jobId;
     } catch (e) {
@@ -959,9 +1091,21 @@ CRITICAL REQUIREMENTS:
     }
   }
 
-  Future<List<dynamic>> generateCalendar(String topic, {int days = 7, Function(String)? onRetry}) async {
+  /// [tone] / [goal] optional — backend defaults to natural tone + engagement if omitted.
+  Future<List<dynamic>> generateCalendar(
+    String topic, {
+    int days = 7,
+    String? tone,
+    String? goal,
+    Function(String)? onRetry,
+  }) async {
     try {
-      final jobId = await createCalendarJob(topic: topic, days: days);
+      final jobId = await createCalendarJob(
+        topic: topic,
+        days: days,
+        tone: tone,
+        goal: goal,
+      );
       final result = await pollJobStatus(jobId, onStatusUpdate: onRetry);
       return (result['data'] ?? []) as List<dynamic>;
     } catch (e) {
@@ -998,12 +1142,35 @@ CRITICAL REQUIREMENTS:
     required String startDateTime,
     required String endDateTime,
   }) async {
-    final data = await _post('/calendar/create', {
+    final user = FirebaseAuth.instance.currentUser;
+    if (user == null) {
+      throw Exception('Please login first to use Google Calendar');
+    }
+    final headers = _buildHeaders();
+    final timeoutSec = AiPerformanceConfig.requestTimeoutSeconds;
+    final trimmed = _trimBody({
       'title': title,
       'description': description,
+      'startTime': startDateTime,
+      'endTime': endDateTime,
       'startDateTime': startDateTime,
       'endDateTime': endDateTime,
     });
+    final res = await _client
+        .post(
+          Uri.parse('$baseUrl/calendar/create-event'),
+          headers: headers,
+          body: jsonEncode(trimmed),
+        )
+        .timeout(Duration(seconds: timeoutSec));
+
+    if (res.statusCode == 401) {
+      throw CalendarNotConnectedException();
+    }
+    if (res.statusCode != 200) {
+      throw Exception('Server error: ${res.statusCode} - ${res.body}');
+    }
+    final data = jsonDecode(res.body) as Map<String, dynamic>;
     return data['success'] == true;
   }
 
@@ -1106,17 +1273,180 @@ CRITICAL REQUIREMENTS:
       } else {
         throw Exception('Please provide either userInput or topic');
       }
-      
-      final response = await _post('/ai/reels-script', requestBody, onRetry: onRetry);
-      
-      final data = response['data'] ?? {};
-      if (data is Map) {
-        return Map<String, dynamic>.from(data);
+
+      final endpoint = '/ai/reels-script';
+      final url = '${ApiService.baseUrl}$endpoint';
+      final trimmedBody = _trimBody(requestBody);
+      final payloadJson = jsonEncode(trimmedBody);
+      final headers = _buildHeaders();
+
+      print('🔥 Calling reels script API...');
+      print('URL: $url');
+      print('Payload: $payloadJson');
+
+      for (int attempt = 1; attempt <= 2; attempt++) {
+        try {
+          final res = await _client
+              .post(
+                Uri.parse(url),
+                headers: headers,
+                body: payloadJson,
+              )
+              .timeout(Duration(seconds: AiPerformanceConfig.requestTimeoutSeconds));
+
+          print('✅ API Response: ${res.statusCode} ${res.body}');
+
+          if (res.statusCode == 200) {
+            final response = jsonDecode(res.body) as Map<String, dynamic>;
+            final data = response['data'] ?? {};
+            if (data is Map) return Map<String, dynamic>.from(data);
+            return <String, dynamic>{};
+          }
+
+          print('❌ Reels script API error body: ${res.body}');
+
+          if (res.statusCode == 403) {
+            try {
+              final errBody = jsonDecode(res.body) as Map<String, dynamic>?;
+              final code = errBody?['code'] ?? errBody?['error'];
+              if (code == 'DAILY_LIMIT_REACHED') {
+                final msg = errBody?['message'] as String? ?? 'Daily AI limit reached.';
+                throw DailyLimitReachedException(msg);
+              }
+            } catch (e) {
+              if (e is DailyLimitReachedException) rethrow;
+            }
+          }
+
+          if (attempt == 1) {
+            if (onRetry != null) onRetry('Retrying reels script...');
+            await Future.delayed(const Duration(seconds: 2));
+            continue;
+          }
+          throw Exception('Reels script API failed (${res.statusCode}): ${res.body}');
+        } on TimeoutException catch (e) {
+          print('❌ Reels script API timeout: $e');
+          if (attempt == 1) {
+            if (onRetry != null) onRetry('Retrying reels script after timeout...');
+            await Future.delayed(const Duration(seconds: 2));
+            continue;
+          }
+          throw Exception('Reels script API timeout after retry: $e');
+        } on SocketException catch (e) {
+          print('❌ Reels script API socket error: $e');
+          if (attempt == 1) {
+            if (onRetry != null) onRetry('Retrying reels script after network issue...');
+            await Future.delayed(const Duration(seconds: 2));
+            continue;
+          }
+          throw Exception('Reels script API connection failed after retry: $e');
+        }
       }
-      
-      return <String, dynamic>{};
+
+      throw Exception('Reels script API failed unexpectedly');
     } catch (e) {
       rethrow;
+    }
+  }
+
+  Future<Map<String, dynamic>> generateContentEngine({
+    required String niche,
+    String goal = 'engagement',
+  }) async {
+    final res = await _post('/ai/content-engine', {
+      'niche': niche,
+      'goal': goal,
+    });
+    final data = res['data'];
+    if (data is Map<String, dynamic>) return data;
+    if (data is Map) return Map<String, dynamic>.from(data);
+    return <String, dynamic>{};
+  }
+
+  Future<Map<String, dynamic>> getGrowthCoach({
+    int followers = 0,
+    int posts = 0,
+    String activity = 'medium',
+  }) async {
+    final uri = Uri.parse('$baseUrl/ai/growth-coach').replace(queryParameters: {
+      'followers': followers.toString(),
+      'posts': posts.toString(),
+      'activity': activity,
+    });
+    final headers = _buildHeaders();
+    final res = await _client.get(uri, headers: headers).timeout(const Duration(seconds: 25));
+    if (res.statusCode != 200) {
+      throw Exception('Growth coach failed: ${res.statusCode} ${res.body}');
+    }
+    final decoded = jsonDecode(res.body) as Map<String, dynamic>;
+    final data = decoded['data'];
+    if (data is Map<String, dynamic>) return data;
+    if (data is Map) return Map<String, dynamic>.from(data);
+    return <String, dynamic>{};
+  }
+
+  Future<Map<String, dynamic>> adminNotificationPreview(Map<String, dynamic> payload) async {
+    try {
+      return await _post('/admin/notifications/preview', payload);
+    } catch (e) {
+      rethrow;
+    }
+  }
+
+  Future<Map<String, dynamic>> adminNotificationSend(Map<String, dynamic> payload) async {
+    try {
+      return await _post('/admin/notifications/send', payload);
+    } catch (e) {
+      rethrow;
+    }
+  }
+
+  Future<Map<String, dynamic>> retentionMissionToday() async {
+    return _get('/retention/mission/today');
+  }
+
+  Future<Map<String, dynamic>> retentionMissionCompleteTask({required String taskType}) async {
+    return _post('/retention/mission/complete-task', {'taskType': taskType});
+  }
+
+  Future<Map<String, dynamic>> retentionRecommendations() async {
+    return _get('/retention/recommendations');
+  }
+
+  Future<Map<String, dynamic>> retentionWeeklyReport() async {
+    return _get('/retention/weekly-report');
+  }
+
+  Future<Map<String, dynamic>> retentionMarkToolUsed({
+    required String tool,
+    String inputSnippet = '',
+  }) async {
+    return _post('/retention/mission/view', {
+      'tool': tool,
+      'inputSnippet': inputSnippet,
+    });
+  }
+
+  /// True when production exposes retention routes AND Firestore is ready.
+  /// Does not throw; use for Home UI when mission cards would otherwise be silent.
+  Future<bool> retentionBackendAvailable() async {
+    try {
+      final res = await _client
+          .get(
+            Uri.parse('$baseUrl/retention/health'),
+            headers: {
+              'Accept': 'application/json',
+              'Cache-Control': 'no-cache',
+            },
+          )
+          .timeout(const Duration(seconds: 15));
+      if (res.statusCode != 200) return false;
+      final decoded = jsonDecode(res.body);
+      if (decoded is! Map<String, dynamic>) return false;
+      return decoded['success'] == true && decoded['firestoreReady'] == true;
+    } catch (e) {
+      if (kDebugMode) print('[API] retentionBackendAvailable: $e');
+      return false;
     }
   }
 }

@@ -1,18 +1,35 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../widgets/ai_ad_banner.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:intl/intl.dart';
 import '../services/api_service.dart';
+import '../services/analytics_service.dart';
 import '../services/history_service.dart';
 import '../services/voice_service.dart';
 import '../services/ai_usage_control_service.dart';
+import '../services/shared_ai_content_store.dart';
 import '../utils/ai_usage_guard.dart';
+import '../utils/app_error_handler.dart';
 import '../widgets/ai_credit_badge.dart';
-import '../widgets/ai_plan_countdown.dart';
+import '../widgets/ai_progressive_loading.dart';
 import '../widgets/voice_play_button.dart';
 import 'history_screen.dart';
+
+class _ReelQuickTopic {
+  const _ReelQuickTopic(this.label, this.text);
+  final String label;
+  final String text;
+}
+
+const List<_ReelQuickTopic> _kReelQuickTopics = [
+  _ReelQuickTopic('Viral', 'Viral 30 sec reel with high retention hook and strong CTA'),
+  _ReelQuickTopic('Business', 'Business growth reel: 3 practical tips for small founders'),
+  _ReelQuickTopic('Story', 'Storytelling reel: failure to comeback journey in 30 seconds'),
+  _ReelQuickTopic('Educational', 'Educational reel explaining one concept in simple steps'),
+];
 
 class ReelsScriptScreen extends StatefulWidget {
   const ReelsScriptScreen({super.key});
@@ -27,13 +44,21 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final HistoryService _historyService = HistoryService();
   bool _isGenerating = false;
-  String _loadingMessage = 'Generating script...';
+  String _loadingMessage = 'AI is writing your script...';
   Map<String, dynamic>? _scriptData;
 
   @override
   void initState() {
     super.initState();
     AiUsageControlService.instance.refresh();
+    final shared = SharedAiContentStore.instance.current;
+    if (shared.script.isNotEmpty) {
+      _userInputController.text = shared.script.join(' ');
+    } else if (shared.idea.trim().isNotEmpty) {
+      _userInputController.text = shared.idea;
+    } else if (shared.hook.trim().isNotEmpty) {
+      _userInputController.text = shared.hook;
+    }
   }
 
   @override
@@ -47,7 +72,7 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
     if (_userInputController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Please describe what kind of reel script you want'),
+          content: Text('Describe your reel, or tap a quick idea below.'),
           backgroundColor: Colors.orange,
         ),
       );
@@ -57,7 +82,7 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
     VoiceService().stop();
     setState(() {
       _isGenerating = true;
-      _loadingMessage = 'Generating script...';
+        _loadingMessage = 'AI is writing your script...';
       if (regenerate) {
         _scriptData = null; // Clear previous output on regenerate
       }
@@ -97,6 +122,18 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
         _scriptData = safeData;
         _isGenerating = false;
       });
+      SharedAiContentStore.instance.update(
+        idea: userInput,
+        hook: safeData['hook']?.toString() ?? '',
+        caption: safeData['caption']?.toString() ?? '',
+        hashtags: List.from(safeData['hashtags'] as List? ?? []).map((e) => e.toString()).toList(),
+        script: List.from(safeData['scene_by_scene'] as List? ?? []).map((e) {
+          if (e is Map) return (e['dialogue'] ?? e['visual'] ?? '').toString();
+          return e.toString();
+        }).where((x) => x.trim().isNotEmpty).toList(),
+      );
+
+      AnalyticsService.logAiToolUsed(toolId: 'reel_script');
 
       // Check for empty data and save to history (using scene_by_scene, not scenes)
       final hook = safeData['hook']?.toString() ?? '';
@@ -129,31 +166,28 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
       }
     } catch (e) {
       if (kDebugMode) debugPrint('[Reels Script] ERROR: ${e.toString()}');
-      
+
       if (!mounted) return;
-      
-      // CRITICAL: Always stop loading in catch block
-      setState(() => _isGenerating = false);
-      
-      String errorMessage = 'AI service not responding. Please check your connection and try again.';
-      
-      if (e.toString().contains('CONNECTION_ERROR')) {
-        errorMessage = 'Cannot connect to backend. Make sure server is running.';
-      } else if (e.toString().contains('TIMEOUT_ERROR')) {
-        errorMessage = 'Request timed out. Please try again.';
-      } else if (e.toString().contains('Invalid JSON')) {
-        errorMessage = 'Invalid response from server. Please try again.';
-      } else if (e.toString().contains('AI generation failed')) {
-        errorMessage = 'AI generation failed. Please try again.';
-      } else {
-        errorMessage = e.toString().replaceAll('Exception: ', '').replaceAll('Error: ', '');
-      }
-      
+      await AppErrorHandler.log('ReelsScript', e);
+      final fallback = _buildFallbackScript(_userInputController.text.trim());
+      setState(() {
+        _scriptData = fallback;
+        _isGenerating = false;
+      });
+      SharedAiContentStore.instance.update(
+        idea: _userInputController.text.trim(),
+        hook: fallback['hook']?.toString() ?? '',
+        caption: fallback['caption']?.toString() ?? '',
+        hashtags: List.from(fallback['hashtags'] as List? ?? []).map((e) => e.toString()).toList(),
+        script: List.from(fallback['scene_by_scene'] as List? ?? []).map((e) {
+          if (e is Map) return (e['dialogue'] ?? '').toString();
+          return e.toString();
+        }).where((x) => x.trim().isNotEmpty).toList(),
+      );
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(errorMessage),
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 5),
+        const SnackBar(
+          content: Text('Using backup AI script for now.'),
+          backgroundColor: Color(0xFF7B2CBF),
         ),
       );
     } finally {
@@ -163,6 +197,62 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
         setState(() => _isGenerating = false);
       }
     }
+  }
+
+  Map<String, dynamic> _buildFallbackScript(String userInput) {
+    final safeTopic = userInput.isNotEmpty ? userInput : 'your topic';
+    return {
+      'hook': 'Stop scrolling: this $safeTopic idea can boost your reach today.',
+      'scene_by_scene': [
+        {
+          'time': '0-3s',
+          'visual': 'Close-up intro with strong expression and on-screen headline.',
+          'dialogue': 'If you create $safeTopic content, this one tweak changes everything.',
+        },
+        {
+          'time': '3-10s',
+          'visual': 'Quick B-roll showing the process/problem.',
+          'dialogue': 'Most creators miss this simple structure and lose retention early.',
+        },
+        {
+          'time': '10-20s',
+          'visual': 'Show solution steps with text overlays.',
+          'dialogue': 'Use a clear hook, one key value point, and a direct call to action.',
+        },
+      ],
+      'cta': 'Save this reel and comment "SCRIPT" if you want part 2.',
+      'caption': 'Simple reel script formula for better retention and engagement.',
+      'hashtags': ['#reels', '#instagramgrowth', '#contentcreator', '#socialmediatips'],
+      'fullScript':
+          'Hook: Stop scrolling: this idea can boost your reach today.\n\nScene 1 (0-3s): If you create this content, this one tweak changes everything.\nScene 2 (3-10s): Most creators miss this simple structure and lose retention early.\nScene 3 (10-20s): Use a clear hook, one key value point, and a direct call to action.\n\nCTA: Save this reel and comment "SCRIPT" if you want part 2.',
+    };
+  }
+
+  String _composeFullScriptCopy() {
+    if (_scriptData == null) return '';
+    final full = _scriptData!['fullScript']?.toString() ?? '';
+    if (full.trim().isNotEmpty) return full;
+    final hook = _scriptData!['hook']?.toString() ?? '';
+    final scenes = List<Map<String, dynamic>>.from(
+      (List.from(_scriptData!['scene_by_scene'] as List? ?? [])).map((scene) {
+        if (scene is Map) return Map<String, dynamic>.from(scene);
+        return <String, dynamic>{};
+      }),
+    );
+    final cta = _scriptData!['cta']?.toString() ?? '';
+    final caption = _scriptData!['caption']?.toString() ?? '';
+    final hashtags = List.from(_scriptData!['hashtags'] as List? ?? []).join(' ');
+    final sceneText = scenes
+        .asMap()
+        .entries
+        .map((entry) {
+          final item = entry.value;
+          final time = item['time']?.toString() ?? '';
+          final dialogue = item['dialogue']?.toString() ?? '';
+          return 'Scene ${entry.key + 1}${time.isNotEmpty ? ' ($time)' : ''}: $dialogue';
+        })
+        .join('\n');
+    return 'Hook: $hook\n\n$sceneText\n\nCTA: $cta\n\nCaption: $caption\n$hashtags';
   }
 
   Future<void> _saveScript() async {
@@ -392,11 +482,13 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
 
   Future<void> _copyToClipboard(String text) async {
     await Clipboard.setData(ClipboardData(text: text));
+    await AnalyticsService.logFirstAiResultCopiedOnce(toolId: 'reel_script');
     if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Copied to clipboard!'),
+        content: Text('Copied — paste in Instagram.'),
         backgroundColor: Color(0xFF7B2CBF),
+        behavior: SnackBarBehavior.floating,
         duration: Duration(seconds: 2),
       ),
     );
@@ -581,6 +673,7 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
     final isDark = Theme.of(context).brightness == Brightness.dark;
     
     return Scaffold(
+      bottomNavigationBar: const AiAdBanner(),
       appBar: AppBar(
         title: const Text('Reels Script Writer'),
         backgroundColor: const Color(0xFF7B2CBF),
@@ -673,13 +766,13 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      // ChatGPT-style Free Text Input
+                      // Premium free text input
                       TextField(
                         controller: _userInputController,
                         maxLines: 5,
                         decoration: InputDecoration(
-                          labelText: 'Describe your reel script',
-                          hintText: 'e.g., "Make a 15 sec motivational reel for students in Hinglish"\n"Funny reel script for brand promotion, casual tone"\n"Emotional storytelling reel about failure and comeback"',
+                          labelText: 'Reel Idea',
+                          hintText: 'Describe your reel idea...',
                           prefixIcon: const Icon(Icons.edit_note, color: Color(0xFF7B2CBF)),
                           filled: true,
                           fillColor: const Color(0xFFF8F6FF),
@@ -696,92 +789,184 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
                           ),
                           contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
                         ),
+                        onChanged: (_) => setState(() {}),
                       ),
                       const SizedBox(height: 12),
-                      
-                      // Info Card
-                      Container(
-                        padding: const EdgeInsets.all(12),
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF7B2CBF).withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(12),
-                          border: Border.all(
-                            color: const Color(0xFF7B2CBF).withOpacity(0.3),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'Suggestion chips',
+                          style: TextStyle(
+                            fontSize: 13,
+                            fontWeight: FontWeight.w600,
+                            color: isDark ? Colors.white70 : Colors.grey[800],
                           ),
                         ),
-                        child: Row(
-                          children: [
-                            const Icon(Icons.lightbulb_outline, color: Color(0xFF7B2CBF), size: 20),
-                            const SizedBox(width: 12),
-                            Expanded(
-                              child: Text(
-                                'AI will automatically understand tone, language, duration, and audience from your description',
-                                style: TextStyle(
-                                  fontSize: 12,
-                                  color: Colors.grey[700],
-                                  height: 1.4,
-                                ),
-                              ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: _kReelQuickTopics.map((t) {
+                          return ActionChip(
+                            label: Text(t.label),
+                            onPressed: () {
+                              setState(() {
+                                _userInputController.text = t.text;
+                              });
+                            },
+                            backgroundColor: isDark ? const Color(0xFF2A2A2A) : Colors.grey[100],
+                            side: BorderSide(color: Colors.grey[400]!),
+                            labelStyle: const TextStyle(
+                              fontSize: 13,
+                              color: Color(0xFF4A148C),
+                              fontWeight: FontWeight.w500,
                             ),
-                          ],
-                        ),
+                          );
+                        }).toList(),
                       ),
                       const SizedBox(height: 20),
-                      
-                      // Generate Button
-                      ElevatedButton.icon(
-                        onPressed: (_isGenerating || (AiUsageControlService.instance.lastState != null && AiUsageControlService.instance.lastState!.isFree && AiUsageControlService.instance.lastState!.isLimitReached)) ? null : () => _generateScript(),
-                        icon: _isGenerating
-                            ? const SizedBox(
-                                height: 20,
-                                width: 20,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  valueColor: AlwaysStoppedAnimation<Color>(Colors.white),
-                                ),
-                              )
-                            : const Icon(Icons.play_arrow),
-                        label: Text(
-                          _isGenerating
-                              ? _loadingMessage
-                              : (AiUsageControlService.instance.lastState != null && AiUsageControlService.instance.lastState!.isFree && AiUsageControlService.instance.lastState!.isLimitReached)
-                                  ? 'Upgrade to Premium'
-                                  : 'Generate Script',
-                        ),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF7B2CBF),
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 16),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
+
+                      // Centered main CTA
+                      Center(
+                        child: Container(
+                          width: double.infinity,
+                          margin: const EdgeInsets.symmetric(horizontal: 8),
+                          decoration: BoxDecoration(
+                            gradient: const LinearGradient(
+                              colors: [Color(0xFF7B2CBF), Color(0xFF9D4EDD)],
+                            ),
+                            borderRadius: BorderRadius.circular(18),
+                            boxShadow: [
+                              BoxShadow(
+                                color: const Color(0xFF7B2CBF).withValues(alpha: 0.25),
+                                blurRadius: 12,
+                                offset: const Offset(0, 4),
+                              ),
+                            ],
+                          ),
+                          child: ElevatedButton(
+                            onPressed: (_isGenerating || (AiUsageControlService.instance.lastState != null && AiUsageControlService.instance.lastState!.isFree && AiUsageControlService.instance.lastState!.isLimitReached)) ? null : () => _generateScript(),
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.transparent,
+                              foregroundColor: Colors.white,
+                              shadowColor: Colors.transparent,
+                              padding: const EdgeInsets.symmetric(vertical: 18),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(18),
+                              ),
+                            ),
+                            child: Text(
+                              _isGenerating
+                                  ? _loadingMessage
+                                  : (AiUsageControlService.instance.lastState != null && AiUsageControlService.instance.lastState!.isFree && AiUsageControlService.instance.lastState!.isLimitReached)
+                                      ? 'Upgrade to Premium'
+                                      : '✨ Generate Viral Reel Script',
+                              style: const TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w800,
+                              ),
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                              softWrap: false,
+                            ),
                           ),
                         ),
                       ),
                       
-                      // Regenerate Button (only show if script exists)
-                      if (_scriptData != null) ...[
-                        const SizedBox(height: 12),
-                        OutlinedButton.icon(
-                          onPressed: (_isGenerating || (AiUsageControlService.instance.lastState != null && AiUsageControlService.instance.lastState!.isFree && AiUsageControlService.instance.lastState!.isLimitReached)) ? null : () => _generateScript(regenerate: true),
-                          icon: const Icon(Icons.refresh),
-                          label: const Text('Regenerate New Style'),
-                          style: OutlinedButton.styleFrom(
-                            foregroundColor: const Color(0xFF7B2CBF),
-                            side: const BorderSide(color: Color(0xFF7B2CBF)),
-                            padding: const EdgeInsets.symmetric(vertical: 16),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                          ),
-                        ),
-                      ],
                     ],
                   ),
                 ),
+
+                if (_isGenerating) ...[
+                  const SizedBox(height: 24),
+                  Container(
+                    padding: const EdgeInsets.all(24),
+                    decoration: BoxDecoration(
+                      color: const Color(0xFF7B2CBF).withOpacity(0.05),
+                      borderRadius: BorderRadius.circular(20),
+                    ),
+                    child: const AiProgressiveLoading(
+                      messages: [
+                        'Understanding your idea...',
+                        'AI is writing your script...',
+                        'Finishing your reel script...',
+                      ],
+                      accentColor: Color(0xFF7B2CBF),
+                    ),
+                  ),
+                ],
                 
                 // Output Section
                 if (_scriptData != null) ...[
                   const SizedBox(height: 24),
+                  Text(
+                    'Reel Script Studio Output',
+                    style: TextStyle(
+                      fontSize: 20,
+                      fontWeight: FontWeight.w800,
+                      color: isDark ? Colors.white : const Color(0xFF1A1A1A),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: () => _copyToClipboard(_composeFullScriptCopy()),
+                          icon: const Icon(Icons.copy_all_rounded, size: 18),
+                          label: const Text(
+                            'Copy Full Script',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            softWrap: false,
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: const Color(0xFF7B2CBF),
+                            side: BorderSide(
+                              color: const Color(0xFF7B2CBF).withValues(alpha: 0.45),
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: FilledButton.icon(
+                          onPressed: _saveScript,
+                          icon: const Icon(Icons.bookmark_add_outlined, size: 18),
+                          label: const Text(
+                            'Save Script',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            softWrap: false,
+                          ),
+                          style: FilledButton.styleFrom(
+                            backgroundColor: const Color(0xFF7B2CBF),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: OutlinedButton.icon(
+                          onPressed: _isGenerating ? null : () => _generateScript(regenerate: true),
+                          icon: const Icon(Icons.refresh, size: 18),
+                          label: const Text(
+                            'Regenerate',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            softWrap: false,
+                          ),
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: const Color(0xFF7B2CBF),
+                            side: BorderSide(
+                              color: const Color(0xFF7B2CBF).withValues(alpha: 0.45),
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 20),
                   
                   // Full Script Section (Like ChatGPT)
                   if (_scriptData!['fullScript'] != null && _scriptData!['fullScript'].toString().isNotEmpty) ...[
@@ -861,6 +1046,26 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
                               ),
                             ),
                           ),
+                          const SizedBox(height: 16),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton.icon(
+                              onPressed: () => _copyToClipboard(_scriptData!['fullScript'].toString()),
+                              icon: const Icon(Icons.copy_all_rounded, size: 22),
+                              label: const Text(
+                                'Copy full script',
+                                style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                              ),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFF7B2CBF),
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(vertical: 14),
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(14),
+                                ),
+                              ),
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -869,7 +1074,7 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
                   // Hook Section
                   if (_scriptData!['hook'] != null && _scriptData!['hook'].toString().isNotEmpty) ...[
                     Text(
-                      'Hook (Scroll Stopper)',
+                      'Hook Card',
                       style: TextStyle(
                         fontSize: 20,
                         fontWeight: FontWeight.bold,
@@ -923,7 +1128,7 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
                   // Script Scenes Section (using scene_by_scene format)
                   if ((_scriptData!['scene_by_scene'] as List? ?? []).isNotEmpty) ...[
                     Text(
-                      'Script Scenes',
+                      'Scene-by-Scene Timeline',
                       style: TextStyle(
                         fontSize: 20,
                         fontWeight: FontWeight.bold,
@@ -938,6 +1143,9 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
                       final scene = sceneRaw is Map 
                           ? Map<String, dynamic>.from(sceneRaw)
                           : <String, dynamic>{};
+                      final timestamp = scene['time']?.toString().trim().isNotEmpty == true
+                          ? scene['time'].toString()
+                          : '${index * 5}-${(index + 1) * 5}s';
                       
                       return Container(
                         margin: const EdgeInsets.only(bottom: 16),
@@ -975,14 +1183,13 @@ class _ReelsScriptScreenState extends State<ReelsScriptScreen> {
                                   ),
                                 ),
                                 const SizedBox(width: 12),
-                                if (scene['time'] != null)
-                                  Text(
-                                    scene['time'].toString(),
-                                    style: TextStyle(
-                                      fontSize: 12,
-                                      color: isDark ? Colors.white70 : Colors.grey[600],
-                                    ),
+                                Text(
+                                  timestamp,
+                                  style: TextStyle(
+                                    fontSize: 12,
+                                    color: isDark ? Colors.white70 : Colors.grey[600],
                                   ),
+                                ),
                               ],
                             ),
                             const SizedBox(height: 12),

@@ -1,5 +1,7 @@
 import 'package:firebase_analytics/firebase_analytics.dart';
+import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Firebase Analytics monetization events.
 /// Event names and params follow Firebase recommendations (≤40 chars for names/keys).
@@ -38,14 +40,73 @@ class AnalyticsService {
   }
 
   /// Purchase completed successfully (from purchaseStream).
+  /// Logs custom [purchase_success] (admin/Firestore funnels) and Firebase [logPurchase]
+  /// (recommended event for Google Ads in-app conversion import).
   static void logPurchaseSuccess({
     String? productId,
     String? price,
+    double? value,
+    String currency = 'INR',
+    String? transactionId,
   }) {
     _logEvent('purchase_success', {
       if (productId != null && productId.isNotEmpty) 'product_id': productId,
       if (price != null && price.isNotEmpty) 'price': price,
     });
+
+    final purchaseValue = value ?? parsePriceToValue(price);
+    if (purchaseValue == null || purchaseValue <= 0) return;
+
+    try {
+      _analytics.logPurchase(
+        currency: currency,
+        value: purchaseValue,
+        transactionId: transactionId,
+        items: productId != null && productId.isNotEmpty
+            ? [
+                AnalyticsEventItem(
+                  itemId: productId,
+                  itemName: productId,
+                  price: purchaseValue,
+                  quantity: 1,
+                ),
+              ]
+            : null,
+      );
+      if (kDebugMode) {
+        debugPrint('[Analytics] logPurchase value=$purchaseValue currency=$currency productId=$productId');
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('[Analytics] logPurchase error: $e');
+    }
+  }
+
+  /// Firebase recommended sign-up event (for Ads / Analytics funnels).
+  static void logSignUp({required String method}) {
+    _logEvent('sign_up', {'method': method});
+  }
+
+  /// Firebase recommended login event (returning users only — not on first sign_up).
+  static void logLogin({required String method}) {
+    _logEvent('login', {'method': method});
+  }
+
+  /// Bind Analytics user id after auth for install → signup → purchase attribution.
+  static Future<void> setUserIdentity(User user) async {
+    try {
+      await _analytics.setUserId(id: user.uid);
+      if (kDebugMode) debugPrint('[Analytics] setUserId uid=${user.uid}');
+    } catch (e) {
+      if (kDebugMode) debugPrint('[Analytics] setUserId error: $e');
+    }
+  }
+
+  /// Parse localized Play price strings (e.g. "₹999.00") to numeric value.
+  static double? parsePriceToValue(String? price) {
+    if (price == null || price.trim().isEmpty) return null;
+    final cleaned = price.replaceAll(RegExp(r'[^\d.]'), '');
+    if (cleaned.isEmpty) return null;
+    return double.tryParse(cleaned);
   }
 
   /// User tapped restore purchases.
@@ -76,6 +137,21 @@ class AnalyticsService {
     _logEvent('ai_tool_used', {
       if (toolId != null && toolId.isNotEmpty) 'tool_id': toolId,
     });
+  }
+
+  /// Logs once per install per [toolId] when user copies AI output (first-win funnel).
+  static Future<void> logFirstAiResultCopiedOnce({required String toolId}) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final key = 'fa_first_ai_copy_$toolId';
+      if (prefs.getBool(key) == true) return;
+      await prefs.setBool(key, true);
+      _logEvent('first_ai_result_copied', {
+        'tool_id': toolId,
+      });
+    } catch (e) {
+      if (kDebugMode) debugPrint('[Analytics] first_ai_result_copied: $e');
+    }
   }
 
   // --- AI usage control events (backend is source of truth; these are for analytics only) ---

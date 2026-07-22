@@ -1,17 +1,23 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../widgets/ai_ad_banner.dart';
 import 'package:flutter/services.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
-import 'package:intl/intl.dart';
+import 'package:share_plus/share_plus.dart';
 import '../services/api_service.dart';
 import '../services/history_service.dart';
 import '../services/ai_usage_control_service.dart';
+import '../services/google_cloud_tts_service.dart';
+import '../services/speech_input_service.dart';
+import '../services/retention_service.dart';
+import '../services/analytics_event_service.dart';
+import '../models/ai_advice_model.dart';
 import '../utils/ai_usage_guard.dart';
-import '../utils/premium_guard.dart';
 import '../widgets/ai_credit_badge.dart';
-import '../widgets/ai_plan_countdown.dart';
 import '../widgets/ai_voice_play_button.dart';
+import '../widgets/ai_coach_card.dart';
 import 'history_screen.dart';
 
 class AICalendarScreen extends StatefulWidget {
@@ -26,9 +32,21 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
   final _api = ApiService();
   final HistoryService _historyService = HistoryService();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
+  final SpeechInputService _speechInput = SpeechInputService.instance;
+  final AnalyticsEventService _analytics = AnalyticsEventService();
   List<dynamic> _calendarItems = [];
   bool _isGenerating = false;
+  bool _isListening = false;
   String _loadingMessage = 'Generating calendar...';
+  AiAdviceModel? _advice;
+  static const String _friendlyError = 'Something went wrong, try again';
+
+  /// 7, 14, or 30 — sent to API (backend clamps 1–30).
+  int _horizonDays = 7;
+  /// Optional: Professional, Casual, Funny — null = backend default.
+  String? _tone;
+  /// Optional: engagement, followers, sales — null = backend default.
+  String? _goal;
 
   @override
   void initState() {
@@ -37,6 +55,7 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
   }
 
   Future<void> _generateCalendar() async {
+    if (_isListening) return;
     if (_topicController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
@@ -50,6 +69,7 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
     setState(() {
       _isGenerating = true;
       _loadingMessage = 'Generating calendar...'; // Reset loading message
+      _calendarItems = []; // Prevent stale 7-day UI while new job is running
     });
     try {
       final items = await runWithBackendAiGuard<List<dynamic>>(
@@ -58,7 +78,9 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
         onGenerate: () async {
           return await _api.generateCalendar(
             _topicController.text.trim(),
-            days: 7,
+            days: _horizonDays,
+            tone: _tone,
+            goal: _goal,
             onRetry: (message) {
               if (mounted) {
                 setState(() {
@@ -77,7 +99,27 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
       setState(() {
         _calendarItems = items;
         _isGenerating = false; // Stop loading on success
+        _advice = _extractAdvice(items);
       });
+      if (_advice != null) {
+        unawaited(_analytics.logAppEvent('ai_advice_rendered', {'tool': 'ai_calendar'}));
+      } else {
+        unawaited(_analytics.logAppEvent('ai_advice_fallback_used', {'tool': 'ai_calendar'}));
+      }
+      unawaited(
+        RetentionService.instance.markToolUsed(
+          tool: 'ai_calendar',
+          inputSnippet: _topicController.text.trim(),
+        ),
+      );
+      unawaited(RetentionService.instance.completeMissionTask('calendar_generate'));
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text('Generated ${items.length} days'),
+          backgroundColor: const Color(0xFF7B2CBF),
+          duration: const Duration(seconds: 2),
+        ),
+      );
 
       // Save to history
       if (items.isNotEmpty) {
@@ -88,7 +130,12 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
           serviceType: 'ai_calendar',
           input: _topicController.text.trim(),
           output: calendarOutput,
-          metadata: {'days': items.length},
+          metadata: {
+            'days': items.length,
+            'horizonDays': _horizonDays,
+            if (_tone != null) 'tone': _tone,
+            if (_goal != null) 'goal': _goal,
+          },
         );
       }
     } catch (e) {
@@ -165,7 +212,12 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
         serviceType: 'ai_calendar',
         input: _topicController.text.trim(),
         output: calendarOutput,
-        metadata: {'days': _calendarItems.length},
+        metadata: {
+          'days': _calendarItems.length,
+          'horizonDays': _horizonDays,
+          if (_tone != null) 'tone': _tone,
+          if (_goal != null) 'goal': _goal,
+        },
       );
 
       // Also save to calendar_history collection for legacy support
@@ -197,239 +249,153 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
     }
   }
 
-  Future<void> _showHistory(BuildContext context) async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Please login first to view history'),
-          backgroundColor: Colors.orange,
-        ),
-      );
-      return;
+  Future<void> _saveAndOpenSchedule() async {
+    await _saveCalendar();
+    unawaited(_analytics.logAppEvent('workflow_saved_draft', {'tool': 'ai_calendar'}));
+    unawaited(_analytics.logAppEvent('workflow_scheduled', {'tool': 'ai_calendar'}));
+    if (!mounted) return;
+    Navigator.pushNamed(context, '/schedule-post');
+  }
+
+  AiAdviceModel? _extractAdvice(List<dynamic> items) {
+    if (items.isEmpty) return null;
+    final first = items.first;
+    if (first is Map && first['ai_advice'] is Map) {
+      final raw = Map<String, dynamic>.from(first['ai_advice']);
+      if (raw['_meta_regenerated'] == true) {
+        unawaited(_analytics.logAppEvent('ai_advice_regenerated', {'tool': 'ai_calendar'}));
+      }
+      if (raw['_meta_low_confidence'] == true) {
+        unawaited(_analytics.logAppEvent('ai_advice_low_confidence', {'tool': 'ai_calendar'}));
+      }
+      final model = AiAdviceModel.fromMap(raw);
+      return model.isUsable ? model : null;
     }
+    return null;
+  }
 
-    showModalBottomSheet(
-      context: context,
-      isScrollControlled: true,
-      backgroundColor: Colors.transparent,
-      builder: (context) => Container(
-        height: MediaQuery.of(context).size.height * 0.85,
-        decoration: const BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.vertical(top: Radius.circular(30)),
-        ),
-        child: Column(
-          children: [
-            Container(
-              margin: const EdgeInsets.only(top: 12),
-              width: 40,
-              height: 4,
-              decoration: BoxDecoration(
-                color: Colors.grey[300],
-                borderRadius: BorderRadius.circular(2),
-              ),
-            ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                children: [
-                  const Text(
-                    'Calendar History',
-                    style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.bold,
-                      color: Color(0xFF1A1A1A),
-                    ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close, color: Colors.grey),
-                    onPressed: () => Navigator.pop(context),
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                  ),
-                ],
-              ),
-            ),
-            Expanded(
-              child: StreamBuilder<QuerySnapshot>(
-                stream: _firestore
-                    .collection('calendar_history')
-                    .where('userId', isEqualTo: user.uid)
-                    .orderBy('createdAt', descending: true)
-                    .snapshots(),
-                builder: (context, snapshot) {
-                  if (snapshot.connectionState == ConnectionState.waiting) {
-                    return const Center(child: CircularProgressIndicator());
-                  }
-
-                  if (snapshot.hasError) {
-                    return Center(child: Text('Error: ${snapshot.error}'));
-                  }
-
-                  final docs = snapshot.data?.docs ?? [];
-                  if (!snapshot.hasData || docs.isEmpty) {
-                    return const Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.history, size: 64, color: Colors.grey),
-                          SizedBox(height: 16),
-                          Text(
-                            'No saved calendars',
-                            style: TextStyle(fontSize: 18, color: Colors.grey),
-                          ),
-                          SizedBox(height: 8),
-                          Text(
-                            'Generate and save a calendar to see it here',
-                            style: TextStyle(color: Colors.grey),
-                          ),
-                        ],
-                      ),
-                    );
-                  }
-
-                  return ListView.builder(
-                    padding: const EdgeInsets.all(16),
-                    itemCount: docs.length,
-                    itemBuilder: (context, index) {
-                      final doc = docs[index];
-                      final data = doc.data() as Map<String, dynamic>;
-                      final topic = data['topic'] ?? 'Untitled';
-                      final createdAt = (data['createdAt'] as Timestamp?)?.toDate();
-                      final calendarItems = data['calendarItems'] as List? ?? [];
-
-                      return Card(
-                        margin: const EdgeInsets.only(bottom: 12),
-                        child: ListTile(
-                          leading: CircleAvatar(
-                            backgroundColor: const Color(0xFF7B2CBF),
-                            child: const Icon(Icons.calendar_month, color: Colors.white),
-                          ),
-                          title: Text(
-                            topic,
-                            style: const TextStyle(fontWeight: FontWeight.bold),
-                          ),
-                          subtitle: Text(
-                            '${calendarItems.length} days • ${createdAt != null ? DateFormat('MMM dd, yyyy • hh:mm a').format(createdAt) : 'Unknown date'}',
-                          ),
-                          trailing: Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              IconButton(
-                                icon: const Icon(Icons.visibility, color: Color(0xFF7B2CBF)),
-                                onPressed: () {
-                                  Navigator.pop(context);
-                                  setState(() {
-                                    _topicController.text = topic;
-                                    _calendarItems = calendarItems;
-                                  });
-                                },
-                                tooltip: 'Load calendar',
-                              ),
-                              IconButton(
-                                icon: const Icon(Icons.delete, color: Colors.red),
-                                onPressed: () => _deleteCalendarHistory(doc.id),
-                                tooltip: 'Delete',
-                              ),
-                            ],
-                          ),
-                        ),
-                      );
-                    },
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
+  void _applyAdvice() {
+    final advice = _advice;
+    if (advice == null) return;
+    if (advice.quickWin.toLowerCase().contains('engagement')) {
+      setState(() => _goal = 'engagement');
+    }
+    if (advice.quickWin.toLowerCase().contains('professional')) {
+      setState(() => _tone = 'Professional');
+    }
+    unawaited(_analytics.logAppEvent('ai_advice_applied', {'tool': 'ai_calendar'}));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Applied AI suggestion to calendar settings.')),
     );
   }
 
-  Future<void> _deleteCalendarHistory(String docId) async {
+  String _hashtagsToString(dynamic hashtags) {
+    if (hashtags is List) {
+      return hashtags.map((e) => e.toString()).join(' ');
+    }
+    return hashtags?.toString() ?? '';
+  }
+
+  Future<void> _startVoiceInput() async {
+    if (_isGenerating || _isListening) return;
+    setState(() => _isListening = true);
     try {
-      await _firestore.collection('calendar_history').doc(docId).delete();
+      final transcript = await _speechInput.listenOnce();
+      if (!mounted) return;
+      if (transcript != null && transcript.isNotEmpty) {
+        _topicController.text = transcript;
+        _topicController.selection = TextSelection.collapsed(offset: transcript.length);
+      }
+    } on SpeechInputException catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Calendar deleted from history'),
-          backgroundColor: Colors.green,
-          duration: Duration(seconds: 2),
-        ),
+        SnackBar(content: Text(e.message), backgroundColor: Colors.orange),
       );
-    } catch (e) {
+    } catch (_) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Failed to delete: $e'),
-          backgroundColor: Colors.red,
-        ),
+        const SnackBar(content: Text(_friendlyError), backgroundColor: Colors.orange),
       );
+    } finally {
+      if (mounted) setState(() => _isListening = false);
     }
   }
 
+  String _formatDayPlainText(Map<String, dynamic> item) {
+    final day = item['day_of_week']?.toString() ?? item['day']?.toString() ?? 'Day';
+    final title = item['title']?.toString();
+    final hook = item['hook']?.toString();
+    final cap = item['caption']?.toString() ?? '';
+    final tags = _hashtagsToString(item['hashtag_set'] ?? item['hashtags']);
+    final buffer = StringBuffer(day);
+    if (title != null && title.isNotEmpty) buffer.writeln('\n$title');
+    if (hook != null && hook.isNotEmpty) buffer.writeln('\n$hook');
+    if (cap.isNotEmpty) buffer.writeln('\n$cap');
+    if (tags.isNotEmpty) buffer.writeln('\n$tags');
+    return buffer.toString().trim();
+  }
+
+  String _fullCalendarPlainText() {
+    final topic = _topicController.text.trim();
+    final header = StringBuffer('InstaFlow — Content calendar\nTopic: $topic\n$_horizonDays days\n---\n');
+    for (final raw in _calendarItems) {
+      final item = raw is Map<String, dynamic> ? raw : <String, dynamic>{};
+      header.writeln(_formatDayPlainText(item));
+      header.writeln('');
+    }
+    return header.toString().trim();
+  }
+
+  Future<void> _copyDayToClipboard(Map<String, dynamic> item) async {
+    await Clipboard.setData(ClipboardData(text: _formatDayPlainText(item)));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Copied to clipboard'), backgroundColor: Color(0xFF7B2CBF)),
+    );
+  }
+
+  Future<void> _copyFullCalendar() async {
+    await Clipboard.setData(ClipboardData(text: _fullCalendarPlainText()));
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Full calendar copied'), backgroundColor: Color(0xFF7B2CBF)),
+    );
+  }
+
+  Future<void> _shareCalendar() async {
+    await Share.share(_fullCalendarPlainText(), subject: 'Instagram content calendar — ${_topicController.text.trim()}');
+  }
+
+  // Google Calendar export needs Google OAuth verification (sensitive
+  // `calendar` scope, blocked on Google's review) and the in-app scheduler is
+  // still gated — so copy this day's plan to the clipboard for now, ready to
+  // paste straight into Instagram or a reminder.
   Future<void> _scheduleToCalendar(dynamic item) async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) {
+    if (!mounted) return;
+    final text = _calendarItemToText(item);
+    if (text.isEmpty) return;
+    try {
+      await Clipboard.setData(ClipboardData(text: text));
+      if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Please login first'),
-          backgroundColor: Colors.orange,
+          content: Text('📋 Copied! Paste it into Instagram or your reminder'),
+          backgroundColor: Color(0xFF7B2CBF),
         ),
       );
-      return;
-    }
+    } catch (_) {}
+  }
 
-    try {
-      final title = item['caption']?.toString() ?? 'InstaFlow Post';
-      final description = item['content_brief']?.toString() ?? item['creative_brief']?.toString() ?? '';
-      final bestTime = item['best_posting_time']?.toString() ?? item['best_time']?.toString() ?? '';
-
-      // Parse best_time or use current time + 1 day
-      DateTime startTime;
-      if (bestTime.isNotEmpty) {
-        // Try to parse time (e.g., "6 PM IST")
-        startTime = DateTime.now().add(const Duration(days: 1));
-        startTime = DateTime(startTime.year, startTime.month, startTime.day, 18, 0);
-      } else {
-        startTime = DateTime.now().add(const Duration(days: 1));
+  String _calendarItemToText(dynamic item) {
+    if (item is Map) {
+      final parts = <String>[];
+      for (final key in ['day', 'date', 'title', 'idea', 'caption', 'content', 'hook', 'hashtags']) {
+        final v = item[key];
+        if (v != null && v.toString().trim().isNotEmpty) parts.add(v.toString().trim());
       }
-
-      final endTime = startTime.add(const Duration(minutes: 30));
-
-      final success = await _api.scheduleEvent(
-        title: title,
-        description: description.isNotEmpty ? description : 'Scheduled via InstaFlow',
-        startDateTime: startTime.toUtc().toIso8601String(),
-        endDateTime: endTime.toUtc().toIso8601String(),
-      );
-
-      if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(success ? 'Added to Google Calendar!' : 'Failed to add to calendar'),
-          backgroundColor: success ? const Color(0xFF7B2CBF) : Colors.red,
-        ),
-      );
-    } catch (e) {
-      if (!mounted) return;
-      
-      // Don't show error if it's a connection/timeout issue (phone disconnected)
-      if (e.toString().contains('CONNECTION_ERROR') || 
-          e.toString().contains('TIMEOUT_ERROR')) {
-        return; // Silently fail when phone is disconnected
-      }
-      
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('Cannot schedule event: ${e.toString().replaceAll('Exception: ', '')}'),
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 5),
-        ),
-      );
+      if (parts.isNotEmpty) return parts.join('\n');
     }
+    return item?.toString() ?? '';
   }
 
   void _showHowToUseGuide(BuildContext context) {
@@ -600,6 +566,8 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
 
   @override
   void dispose() {
+    _speechInput.stop();
+    GoogleCloudTtsService.instance.stop();
     _topicController.dispose();
     super.dispose();
   }
@@ -607,6 +575,7 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      bottomNavigationBar: const AiAdBanner(),
       appBar: AppBar(
         title: const Text('AI Calendar Generator'),
         backgroundColor: const Color(0xFF7B2CBF),
@@ -700,6 +669,14 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
                           labelText: 'Topic',
                           hintText: 'e.g., Fitness, Travel, Food',
                           prefixIcon: const Icon(Icons.calendar_month, color: Color(0xFF7B2CBF)),
+                          suffixIcon: IconButton(
+                            onPressed: (_isGenerating || _isListening) ? null : _startVoiceInput,
+                            tooltip: _isListening ? 'Listening...' : 'Speak topic',
+                            icon: Icon(
+                              _isListening ? Icons.mic : Icons.mic_none_rounded,
+                              color: _isListening ? const Color(0xFF9D4EDD) : const Color(0xFF7B2CBF),
+                            ),
+                          ),
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(12),
                           ),
@@ -709,9 +686,116 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
                           ),
                         ),
                       ),
+                      const SizedBox(height: 16),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'Length',
+                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey[800]),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [7, 14, 30].map((d) {
+                          final selected = _horizonDays == d;
+                          return ChoiceChip(
+                            label: Text('$d days'),
+                            selected: selected,
+                            onSelected: _isGenerating
+                                ? null
+                                : (_) => setState(() => _horizonDays = d),
+                            selectedColor: const Color(0xFF7B2CBF).withOpacity(0.28),
+                            labelStyle: TextStyle(
+                              color: selected ? const Color(0xFF7B2CBF) : Colors.black87,
+                              fontWeight: FontWeight.w600,
+                              fontSize: 13,
+                            ),
+                          );
+                        }).toList(),
+                      ),
+                      const SizedBox(height: 14),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'Tone',
+                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey[800]),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          FilterChip(
+                            label: const Text('Auto'),
+                            selected: _tone == null,
+                            onSelected: _isGenerating ? null : (_) => setState(() => _tone = null),
+                            selectedColor: const Color(0xFF7B2CBF).withOpacity(0.28),
+                          ),
+                          FilterChip(
+                            label: const Text('Professional'),
+                            selected: _tone == 'Professional',
+                            onSelected: _isGenerating ? null : (_) => setState(() => _tone = 'Professional'),
+                            selectedColor: const Color(0xFF7B2CBF).withOpacity(0.28),
+                          ),
+                          FilterChip(
+                            label: const Text('Casual'),
+                            selected: _tone == 'Casual',
+                            onSelected: _isGenerating ? null : (_) => setState(() => _tone = 'Casual'),
+                            selectedColor: const Color(0xFF7B2CBF).withOpacity(0.28),
+                          ),
+                          FilterChip(
+                            label: const Text('Funny'),
+                            selected: _tone == 'Funny',
+                            onSelected: _isGenerating ? null : (_) => setState(() => _tone = 'Funny'),
+                            selectedColor: const Color(0xFF7B2CBF).withOpacity(0.28),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 14),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'Goal',
+                          style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: Colors.grey[800]),
+                        ),
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          FilterChip(
+                            label: const Text('Auto'),
+                            selected: _goal == null,
+                            onSelected: _isGenerating ? null : (_) => setState(() => _goal = null),
+                            selectedColor: const Color(0xFF7B2CBF).withOpacity(0.28),
+                          ),
+                          FilterChip(
+                            label: const Text('Engagement'),
+                            selected: _goal == 'engagement',
+                            onSelected: _isGenerating ? null : (_) => setState(() => _goal = 'engagement'),
+                            selectedColor: const Color(0xFF7B2CBF).withOpacity(0.28),
+                          ),
+                          FilterChip(
+                            label: const Text('Followers'),
+                            selected: _goal == 'followers',
+                            onSelected: _isGenerating ? null : (_) => setState(() => _goal = 'followers'),
+                            selectedColor: const Color(0xFF7B2CBF).withOpacity(0.28),
+                          ),
+                          FilterChip(
+                            label: const Text('Sales'),
+                            selected: _goal == 'sales',
+                            onSelected: _isGenerating ? null : (_) => setState(() => _goal = 'sales'),
+                            selectedColor: const Color(0xFF7B2CBF).withOpacity(0.28),
+                          ),
+                        ],
+                      ),
                       const SizedBox(height: 20),
                       ElevatedButton(
-                        onPressed: (_isGenerating || (AiUsageControlService.instance.lastState != null && AiUsageControlService.instance.lastState!.isFree && AiUsageControlService.instance.lastState!.isLimitReached)) ? null : _generateCalendar,
+                        onPressed: (_isGenerating || _isListening || (AiUsageControlService.instance.lastState != null && AiUsageControlService.instance.lastState!.isFree && AiUsageControlService.instance.lastState!.isLimitReached)) ? null : _generateCalendar,
                         style: ElevatedButton.styleFrom(
                           backgroundColor: const Color(0xFF7B2CBF),
                           foregroundColor: Colors.white,
@@ -732,10 +816,26 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
                             : Text(
                                 (AiUsageControlService.instance.lastState != null && AiUsageControlService.instance.lastState!.isFree && AiUsageControlService.instance.lastState!.isLimitReached)
                                     ? 'Upgrade to Premium'
-                                    : 'Generate 7-Day Calendar',
+                                    : 'Generate $_horizonDays-Day Calendar',
                                 style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                               ),
                       ),
+                      if (_isGenerating) ...[
+                        const SizedBox(height: 12),
+                        Text(
+                          _loadingMessage,
+                          textAlign: TextAlign.center,
+                          style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+                        ),
+                      ],
+                      if (_isListening) ...[
+                        const SizedBox(height: 12),
+                        Text(
+                          'Listening... speak now',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(fontSize: 12, color: Colors.grey[700]),
+                        ),
+                      ],
                     ],
                   ),
                 ),
@@ -744,6 +844,11 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
 
                 // Results Section
                 if (_calendarItems.isNotEmpty) ...[
+                  if (_advice != null)
+                    AiCoachCard(
+                      advice: _advice!,
+                      onApply: _applyAdvice,
+                    ),
                   Row(
                     children: [
                       Container(
@@ -757,15 +862,36 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
                         ),
                       ),
                       const SizedBox(width: 12),
-                      const Expanded(
+                      Expanded(
                         child: Text(
-                          '7-Day Content Calendar',
-                          style: TextStyle(
+                          '$_horizonDays-Day Content Calendar (${_calendarItems.length} generated)',
+                          style: const TextStyle(
                             fontSize: 20,
                             fontWeight: FontWeight.bold,
                             color: Color(0xFF1A1A1A),
                           ),
                         ),
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.copy_all_outlined, color: Color(0xFF7B2CBF)),
+                        onPressed: _copyFullCalendar,
+                        tooltip: 'Copy full calendar',
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.share_outlined, color: Color(0xFF7B2CBF)),
+                        onPressed: _shareCalendar,
+                        tooltip: 'Share calendar',
+                      ),
+                      IconButton(
+                        icon: const Icon(Icons.schedule_send_outlined, color: Color(0xFF7B2CBF)),
+                        onPressed: _saveAndOpenSchedule,
+                        tooltip: 'Save & schedule',
+                      ),
+                      AIVoicePlayButton(
+                        textToSpeak: _fullCalendarPlainText(),
+                        cacheKey: 'cal_full_${_fullCalendarPlainText().hashCode}',
+                        iconSize: 20,
+                        iconColor: const Color(0xFF7B2CBF),
                       ),
                       IconButton(
                         icon: const Icon(Icons.bookmark_add, color: Color(0xFF7B2CBF)),
@@ -776,7 +902,7 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
                   ),
                   const SizedBox(height: 16),
                   ..._calendarItems.asMap().entries.map((entry) {
-                    final item = entry.value as Map<String, dynamic>;
+                    final item = Map<String, dynamic>.from(entry.value as Map);
                     // Support both old and new field names
                     final dayOfWeek = item['day_of_week']?.toString() ?? item['day']?.toString() ?? 'Day';
                     final contentType = item['content_type']?.toString() ?? item['post_type']?.toString() ?? 'Post';
@@ -848,8 +974,19 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
                                   ),
                                 ),
                                 const Spacer(),
+                                IconButton(
+                                  icon: const Icon(Icons.copy_rounded, color: Color(0xFF7B2CBF)),
+                                  onPressed: () => _copyDayToClipboard(item),
+                                  tooltip: 'Copy day',
+                                  constraints: const BoxConstraints(),
+                                  padding: const EdgeInsets.all(8),
+                                ),
                                 AIVoicePlayButton(
-                                  textToSpeak: (hook != null && hook.isNotEmpty ? '$hook. ' : '') + (item['caption']?.toString() ?? ''),
+                                  textToSpeak: [
+                                    if (hook != null && hook.isNotEmpty) hook,
+                                    item['caption']?.toString() ?? '',
+                                    if (_hashtagsToString(hashtags).isNotEmpty) 'Hashtags: ${_hashtagsToString(hashtags)}',
+                                  ].where((e) => e.isNotEmpty).join('. '),
                                   cacheKey: 'cal_${entry.key}_${item['caption']?.hashCode ?? 0}',
                                   iconSize: 20,
                                   iconColor: const Color(0xFF7B2CBF),
@@ -907,7 +1044,7 @@ class _AICalendarScreenState extends State<AICalendarScreen> {
                               Wrap(
                                 spacing: 4,
                                 runSpacing: 4,
-                                children: (hashtags as List)
+                                children: hashtags
                                     .map((tag) => Text(
                                           tag.toString(),
                                           style: const TextStyle(

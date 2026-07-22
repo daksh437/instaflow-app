@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../widgets/ai_ad_banner.dart';
 import 'package:flutter/services.dart';
 import 'package:image_picker/image_picker.dart';
 import 'dart:io';
@@ -222,6 +223,7 @@ class _AICaptionFromMediaScreenState extends State<AICaptionFromMediaScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      bottomNavigationBar: const AiAdBanner(),
       appBar: AppBar(
         title: const Text('AI Caption From Photo / Reel'),
         backgroundColor: const Color(0xFF7B2CBF),

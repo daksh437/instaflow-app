@@ -1,6 +1,9 @@
 import 'package:flutter/material.dart';
+import '../widgets/ai_ad_banner.dart';
 import '../services/ai_service.dart';
 import '../services/history_service.dart';
+import '../services/ai_usage_control_service.dart';
+import '../utils/ai_usage_guard.dart';
 import '../utils/clipboard_utils.dart';
 import 'history_screen.dart';
 
@@ -28,9 +31,21 @@ class _HashtagAnalyzerScreenState extends State<HashtagAnalyzerScreen> {
 
     setState(() => _isAnalyzing = true);
 
-    final hashtags = await _aiService.analyzeHashtags(
-      caption: _captionController.text,
+    // Guard enforces freemium (trial/premium unlimited, free 2/day) and shows
+    // an interstitial ad after each output for non-premium users.
+    final hashtags = await runWithBackendAiGuard<List<String>>(
+      context,
+      service: AiUsageControlService.instance,
+      onGenerate: () => _aiService.analyzeHashtags(
+        caption: _captionController.text,
+      ),
     );
+
+    if (hashtags == null) {
+      if (mounted) setState(() => _isAnalyzing = false);
+      return; // limit reached / not logged in — guard already handled the UI
+    }
+    if (!mounted) return;
 
     setState(() {
       _hashtags = hashtags;
@@ -51,6 +66,7 @@ class _HashtagAnalyzerScreenState extends State<HashtagAnalyzerScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      bottomNavigationBar: const AiAdBanner(),
       backgroundColor: Colors.white,
       appBar: AppBar(
         title: const Text('Hashtag Analyzer'),

@@ -33,8 +33,8 @@ android {
 
     defaultConfig {
         applicationId = "com.instaflow"
-        minSdk = 21
-        targetSdk = 35
+        minSdk = flutter.minSdkVersion
+        targetSdk = 36
         versionCode = flutter.versionCode
         versionName = flutter.versionName
         multiDexEnabled = true

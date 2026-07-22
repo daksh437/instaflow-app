@@ -2,10 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import '../models/user_model.dart';
-import '../services/access_control_service.dart';
 import '../services/analytics_firestore_service.dart';
 import '../services/premium_service.dart';
-import '../services/usage_tracking_service.dart';
 import '../services/ad_service.dart';
 import '../services/analytics_service.dart';
 import '../widgets/upgrade_dialog.dart';
@@ -75,15 +73,12 @@ Future<void> requirePremiumOrTrial(
     return;
   }
 
-  final remainingBonus = await AccessControlService().remainingRewardedBonusesToday(user.uid);
   _showUpgradePopup(
     context,
     source: 'daily_limit',
     title: 'Daily limit reached',
     message: message ??
-        'You\'ve used your 2 free AI uses today. Watch an ad for +1 use or upgrade for unlimited!',
-    userId: user.uid,
-    showWatchAdButton: remainingBonus > 0,
+        'You\'ve used your free AI uses for today. Upgrade to Premium for unlimited AI and no ads!',
   );
 }
 
@@ -97,8 +92,6 @@ void _showUpgradePopup(
   String? source,
   required String title,
   required String message,
-  String? userId,
-  bool showWatchAdButton = false,
 }) {
   AnalyticsService.logUpgradeDialogShown(source: source);
   UpgradeDialog.show(
@@ -106,40 +99,5 @@ void _showUpgradePopup(
     title: title,
     message: message,
     primaryActionLabel: 'Go Premium',
-    showWatchAdButton: showWatchAdButton && userId != null,
-    onWatchAd: userId != null
-        ? (ctx) async {
-            try {
-              final adService = AdService();
-              await adService.loadRewardedAd();
-              final shown = await adService.showRewardedAd(
-                onReward: () async {
-                  await UsageTrackingService().grantRewardedExtraUse(userId);
-                },
-              );
-            if (!ctx.mounted) return;
-            if (shown) {
-              ScaffoldMessenger.of(ctx).showSnackBar(
-                const SnackBar(
-                  content: Text('+1 AI use added for today!'),
-                  backgroundColor: Colors.green,
-                ),
-              );
-              Navigator.of(ctx).pop();
-            } else {
-              ScaffoldMessenger.of(ctx).showSnackBar(
-                const SnackBar(content: Text('Ad not ready. Try again in a moment.')),
-              );
-            }
-            } catch (e) {
-              if (ctx.mounted) {
-                debugPrint('[PremiumGuard] showRewardedAd error: $e');
-                ScaffoldMessenger.of(ctx).showSnackBar(
-                  SnackBar(content: Text('Something went wrong. Try again.')),
-                );
-              }
-            }
-          }
-        : null,
   );
 }

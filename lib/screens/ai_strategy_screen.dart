@@ -1,12 +1,17 @@
+import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../widgets/ai_ad_banner.dart';
 import 'package:flutter/services.dart';
 import '../services/api_service.dart';
 import '../services/history_service.dart';
 import '../services/ai_usage_control_service.dart';
+import '../services/analytics_event_service.dart';
+import '../models/ai_advice_model.dart';
 import '../utils/ai_usage_guard.dart';
 import '../widgets/ai_credit_badge.dart';
 import '../widgets/ai_plan_countdown.dart';
+import '../widgets/ai_coach_card.dart';
 import 'history_screen.dart';
 
 class AIStrategyScreen extends StatefulWidget {
@@ -20,7 +25,9 @@ class _AIStrategyScreenState extends State<AIStrategyScreen> {
   final _nicheController = TextEditingController();
   final _api = ApiService();
   final HistoryService _historyService = HistoryService();
+  final AnalyticsEventService _analytics = AnalyticsEventService();
   Map<String, dynamic> _strategy = {};
+  AiAdviceModel? _advice;
   bool _isGenerating = false;
   String _loadingMessage = 'Generating strategy...';
 
@@ -70,7 +77,13 @@ class _AIStrategyScreenState extends State<AIStrategyScreen> {
       setState(() {
         _strategy = strategy;
         _isGenerating = false; // Stop loading on success
+        _advice = _extractAdvice(strategy);
       });
+      if (_advice != null) {
+        unawaited(_analytics.logAppEvent('ai_advice_rendered', {'tool': 'ai_strategy'}));
+      } else {
+        unawaited(_analytics.logAppEvent('ai_advice_fallback_used', {'tool': 'ai_strategy'}));
+      }
 
       // Save to history
       if (strategy.isNotEmpty) {
@@ -118,6 +131,33 @@ class _AIStrategyScreenState extends State<AIStrategyScreen> {
         setState(() => _isGenerating = false);
       }
     }
+  }
+
+  AiAdviceModel? _extractAdvice(Map<String, dynamic> strategy) {
+    final advice = strategy['ai_advice'];
+    if (advice is Map) {
+      final raw = Map<String, dynamic>.from(advice);
+      if (raw['_meta_regenerated'] == true) {
+        unawaited(_analytics.logAppEvent('ai_advice_regenerated', {'tool': 'ai_strategy'}));
+      }
+      if (raw['_meta_low_confidence'] == true) {
+        unawaited(_analytics.logAppEvent('ai_advice_low_confidence', {'tool': 'ai_strategy'}));
+      }
+      final model = AiAdviceModel.fromMap(raw);
+      return model.isUsable ? model : null;
+    }
+    return null;
+  }
+
+  void _applyAdvice() {
+    final advice = _advice;
+    if (advice == null) return;
+    _nicheController.text = '${_nicheController.text.trim()}\nFocus: ${advice.quickWin}';
+    _nicheController.selection = TextSelection.collapsed(offset: _nicheController.text.length);
+    unawaited(_analytics.logAppEvent('ai_advice_applied', {'tool': 'ai_strategy'}));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Applied AI strategy suggestion to prompt.')),
+    );
   }
 
   Widget _buildStrategyCard(String title, dynamic content) {
@@ -686,6 +726,7 @@ class _AIStrategyScreenState extends State<AIStrategyScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      bottomNavigationBar: const AiAdBanner(),
       appBar: AppBar(
         title: const Text('AI Growth Strategy'),
         backgroundColor: const Color(0xFF7B2CBF),
@@ -833,6 +874,11 @@ class _AIStrategyScreenState extends State<AIStrategyScreen> {
 
                 // Results Section
                 if (_strategy.isNotEmpty) ...[
+                  if (_advice != null)
+                    AiCoachCard(
+                      advice: _advice!,
+                      onApply: _applyAdvice,
+                    ),
                   // Save Button
                   Row(
                     mainAxisAlignment: MainAxisAlignment.end,

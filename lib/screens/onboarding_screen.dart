@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../services/notification_service.dart';
+
 const String _kSeenOnboarding = 'seen_onboarding';
 
 class OnboardingScreen extends StatefulWidget {
@@ -44,19 +46,26 @@ class _OnboardingScreenState extends State<OnboardingScreen> {
       'icon': '🤖',
     },
     {
-      'title': 'Free vs Premium',
-      'body': 'Free: 2 AI uses per day, ads. Premium: Unlimited AI, no ads, and access to all tools. Start with a 7-day free trial.',
-      'icon': '👑',
+      'title': '3 Days Free',
+      'body': 'Get full access to every AI tool — captions, hashtags, reel scripts, bio maker & more — FREE for 3 days. No card needed to start.',
+      'icon': '🎁',
     },
     {
-      'title': 'Daily Limits & Trial',
-      'body': 'New users get a 7-day trial with unlimited AI. After trial, you get 2 free uses per day. Watch an ad for +1 extra use or go Premium for unlimited.',
-      'icon': '📅',
+      'title': 'Free Forever + Premium',
+      'body': 'After your 3-day trial you still get 2 free AI uses every day. Want unlimited? Go Premium — ₹199/month (₹10 for the first week). Cancel anytime.',
+      'icon': '👑',
     },
   ];
 
   Future<void> _finish() async {
     await OnboardingScreen.markSeen();
+    // New user just finished onboarding → schedule day-1/day-2 feature tips and
+    // arm the first-"wow" prompt shown on the next Home open.
+    try {
+      await NotificationService().scheduleOnboardingTips();
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('first_wow_pending', true);
+    } catch (_) {}
     if (mounted) widget.onDone();
   }
 

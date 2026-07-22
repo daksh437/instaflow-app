@@ -5,8 +5,8 @@ import 'package:image_picker/image_picker.dart';
 import '../../services/instagram_auth_service.dart';
 import '../../services/instagram_publish_service.dart';
 
-/// Reel Publish Screen – pick video, caption, publish (mock).
-/// Isolated for Instagram Business automation.
+/// Reel Publish Screen – pick video, caption, publish.
+/// Uses Instagram Business auth + backend publishing routes.
 
 const _accent = Color(0xFF7B2CBF);
 
@@ -57,7 +57,7 @@ class _ReelPublishScreenState extends State<ReelPublishScreen> {
     if (!mounted) return;
     setState(() => _publishing = false);
     if (result.success) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Reel published (mock)'), backgroundColor: _accent));
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Reel published successfully'), backgroundColor: _accent));
       Navigator.maybePop(context);
     } else {
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(result.message), backgroundColor: Colors.red));
@@ -95,7 +95,7 @@ class _ReelPublishScreenState extends State<ReelPublishScreen> {
                   if (mounted) setState(() {});
                 },
                 style: ElevatedButton.styleFrom(backgroundColor: _accent, foregroundColor: Colors.white, padding: const EdgeInsets.symmetric(vertical: 14)),
-                child: const Text('Connect Instagram (mock)'),
+                child: const Text('Connect Instagram'),
               ),
             ],
             if (isLoggedIn) ...[

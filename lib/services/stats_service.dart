@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import '../models/stats_model.dart';
 import '../services/instagram_service.dart';
 import '../models/analytics_model.dart';
@@ -20,6 +21,154 @@ class StatsService {
   DateTime? _cacheTime;
   static const Duration _cacheDuration = Duration(minutes: 5);
 
+  static const int _defaultGrowthDays = 30;
+
+  void _log(String message) {
+    if (kDebugMode) {
+      debugPrint('[StatsService] $message');
+    }
+  }
+
+  Future<StatsSnapshot> buildSnapshotFromLiveData({
+    required String userId,
+    required int followers,
+    required int following,
+    required int mediaCount,
+    required int reach,
+    required int impressions,
+    required int profileViews,
+    required List<PostPerformanceData> topPosts,
+    required bool forceRefresh,
+  }) async {
+    final stats = StatsModel(
+      userId: userId,
+      followers: followers,
+      following: following,
+      profileViews: profileViews,
+      reach7Days: reach > 0 ? reach : impressions,
+      engagementRate: _calculateEngagementRate(followers, topPosts),
+      totalLikes: topPosts.fold<int>(0, (sum, post) => sum + post.likes),
+      totalComments: topPosts.fold<int>(0, (sum, post) => sum + post.comments),
+      totalSaves: topPosts.fold<int>(0, (sum, post) => sum + post.saves),
+      totalShares: topPosts.fold<int>(0, (sum, post) => sum + post.shares),
+      posts: mediaCount,
+      followerGrowth: _generateFollowerGrowthData(followers, _defaultGrowthDays),
+      topPosts: topPosts,
+      engagementStats: _buildEngagementFromPosts(topPosts),
+      healthScore: _calculateHealthScoreFromTopPosts(
+        followers: followers,
+        posts: mediaCount,
+        topPosts: topPosts,
+      ),
+      lastUpdated: DateTime.now(),
+    );
+
+    _cachedStats = stats;
+    _cacheTime = DateTime.now();
+
+    if (!forceRefresh) {
+      final cached = await _tryLoadFirestoreSnapshot(userId);
+      if (cached != null && _isFresh(cached.lastUpdated, _cacheDuration)) {
+        _log('Returning firestore cached snapshot');
+        return StatsSnapshot(
+          stats: cached,
+          source: StatsDataSource.cache,
+          fetchedAt: DateTime.now(),
+        );
+      }
+    }
+
+    await _saveStatsToFirestore(userId, stats);
+    _log('Returning live snapshot');
+    return StatsSnapshot(
+      stats: stats,
+      source: StatsDataSource.live,
+      fetchedAt: DateTime.now(),
+    );
+  }
+
+  Future<StatsSnapshot> fallbackSnapshot({
+    required String userId,
+    required String reason,
+  }) async {
+    _log('Fallback requested: $reason');
+    throw StatsException(
+      'Live stats are currently unavailable. Please check connection and try again.',
+      code: StatsErrorCode.liveUnavailable,
+    );
+  }
+
+  Future<StatsModel?> _tryLoadFirestoreSnapshot(String userId) async {
+    try {
+      final doc = await _firestore.collection('user_stats').doc(userId).get();
+      if (!doc.exists) return null;
+      final raw = doc.data();
+      if (raw == null) return null;
+      return StatsModel.fromFirestore(raw);
+    } catch (_) {
+      return null;
+    }
+  }
+
+  bool _isFresh(DateTime time, Duration window) {
+    return DateTime.now().difference(time) < window;
+  }
+
+  double _calculateEngagementRate(int followers, List<PostPerformanceData> topPosts) {
+    if (followers <= 0 || topPosts.isEmpty) return 0;
+    final totalEngagement = topPosts.fold<int>(
+      0,
+      (sum, post) => sum + post.likes + (post.comments * 2) + (post.saves * 3) + (post.shares * 4),
+    );
+    return ((totalEngagement / topPosts.length) / followers * 100).clamp(0.0, 100.0);
+  }
+
+  EngagementStats _buildEngagementFromPosts(List<PostPerformanceData> topPosts) {
+    final likes = topPosts.fold<int>(0, (sum, post) => sum + post.likes);
+    final comments = topPosts.fold<int>(0, (sum, post) => sum + post.comments);
+    final saves = topPosts.fold<int>(0, (sum, post) => sum + post.saves);
+    final shares = topPosts.fold<int>(0, (sum, post) => sum + post.shares);
+    final avgScore = topPosts.isEmpty
+        ? 0.0
+        : topPosts.fold<double>(0.0, (sum, post) => sum + post.engagementScore) / topPosts.length;
+    return EngagementStats(
+      averageEngagementRate: avgScore,
+      likes7Days: likes,
+      comments7Days: comments,
+      saves7Days: saves,
+      shares7Days: shares,
+    );
+  }
+
+  ProfileHealthScore _calculateHealthScoreFromTopPosts({
+    required int followers,
+    required int posts,
+    required List<PostPerformanceData> topPosts,
+  }) {
+    final avgEngagement = _calculateEngagementRate(followers, topPosts);
+    final consistencyScore = posts > 100 ? 90 : posts > 50 ? 75 : posts > 20 ? 60 : 40;
+    final engagementScore = avgEngagement > 5 ? 90 : avgEngagement > 3 ? 75 : avgEngagement > 1 ? 60 : 40;
+    const profileOptimizationScore = 80;
+    const hashtagScore = 75;
+    final followerQualityScore = (engagementScore * 0.8).round();
+    final overallScore = ((
+      consistencyScore * 0.2 +
+      engagementScore * 0.3 +
+      profileOptimizationScore * 0.2 +
+      hashtagScore * 0.15 +
+      followerQualityScore * 0.15
+    )).round();
+
+    return ProfileHealthScore(
+      overallScore: overallScore.clamp(0, 100),
+      consistencyScore: consistencyScore,
+      engagementScore: engagementScore,
+      profileOptimizationScore: profileOptimizationScore,
+      hashtagScore: hashtagScore,
+      followerQualityScore: followerQualityScore,
+    );
+  }
+
   /// Fetch comprehensive stats for current user
   Future<StatsModel> fetchStats({bool forceRefresh = false}) async {
     final user = FirebaseAuth.instance.currentUser;
@@ -28,11 +177,13 @@ class StatsService {
     }
 
     // Return cached data if available and not expired
+    final cached = _cachedStats;
+    final cachedAt = _cacheTime;
     if (!forceRefresh &&
-        _cachedStats != null &&
-        _cacheTime != null &&
-        DateTime.now().difference(_cacheTime!) < _cacheDuration) {
-      return _cachedStats!;
+        cached != null &&
+        cachedAt != null &&
+        DateTime.now().difference(cachedAt) < _cacheDuration) {
+      return cached;
     }
 
     try {
@@ -43,7 +194,11 @@ class StatsService {
           .get();
 
       if (doc.exists) {
-        final stats = StatsModel.fromFirestore(doc.data()!);
+        final raw = doc.data();
+        if (raw == null) {
+          throw Exception('Stats data unavailable');
+        }
+        final stats = StatsModel.fromFirestore(raw);
         _cachedStats = stats;
         _cacheTime = DateTime.now();
         return stats;
@@ -59,8 +214,10 @@ class StatsService {
 
       return stats;
     } catch (e) {
-      // Return fallback mock data if API fails
-      return _getMockStats(user.uid);
+      throw StatsException(
+        'Unable to fetch Instagram live stats. Please reconnect Instagram and retry.',
+        code: StatsErrorCode.liveUnavailable,
+      );
     }
   }
 
@@ -72,7 +229,10 @@ class StatsService {
       final analytics = await _instagramService.fetchAnalytics(userId, null);
 
       if (analytics == null) {
-        return _getMockStats(userId);
+        throw StatsException(
+          'Instagram analytics data unavailable',
+          code: StatsErrorCode.liveUnavailable,
+        );
       }
 
       // Generate follower growth data (last 30 days)
@@ -115,7 +275,11 @@ class StatsService {
         lastUpdated: DateTime.now(),
       );
     } catch (e) {
-      return _getMockStats(userId);
+      if (e is StatsException) rethrow;
+      throw StatsException(
+        'Failed to generate stats from Instagram API.',
+        code: StatsErrorCode.liveUnavailable,
+      );
     }
   }
 
@@ -157,21 +321,7 @@ class StatsService {
       }).toList();
     }
 
-    // Generate mock top posts if none exist
-    final now = DateTime.now();
-    return List.generate(6, (index) {
-      return PostPerformanceData(
-        postId: 'post_${index + 1}',
-        thumbnailUrl: null,
-        likes: 800 + (index * 200) + (500 - index * 50),
-        comments: 30 + (index * 10),
-        saves: 50 + (index * 15),
-        shares: 10 + index,
-        views: 2000 + (index * 500),
-        reach: 1500 + (index * 400),
-        postedAt: now.subtract(Duration(days: index * 2)),
-      );
-    })..sort((a, b) => b.engagementScore.compareTo(a.engagementScore));
+    return <PostPerformanceData>[];
   }
 
   /// Calculate profile health score
@@ -330,49 +480,44 @@ class StatsService {
     }
   }
 
-  /// Get mock stats for development
-  StatsModel _getMockStats(String userId) {
-    final now = DateTime.now();
-    final followerGrowth = _generateFollowerGrowthData(15234, 30);
-    final topPosts = _generateTopPostsData([]);
-
-    return StatsModel(
-      userId: userId,
-      followers: 15234,
-      following: 523,
-      profileViews: 22851,
-      reach7Days: 12500,
-      engagementRate: 5.8,
-      totalLikes: 15000,
-      totalComments: 450,
-      totalSaves: 2250,
-      totalShares: 1200,
-      posts: 89,
-      followerGrowth: followerGrowth,
-      topPosts: topPosts,
-      engagementStats: EngagementStats(
-        averageEngagementRate: 5.8,
-        likes7Days: 4500,
-        comments7Days: 135,
-        saves7Days: 675,
-        shares7Days: 360,
-      ),
-      healthScore: ProfileHealthScore(
-        overallScore: 78,
-        consistencyScore: 75,
-        engagementScore: 80,
-        profileOptimizationScore: 85,
-        hashtagScore: 75,
-        followerQualityScore: 75,
-      ),
-      lastUpdated: now,
-    );
-  }
-
   /// Clear cache
   void clearCache() {
     _cachedStats = null;
     _cacheTime = null;
   }
+}
+
+enum StatsDataSource {
+  live,
+  cache,
+  fallback,
+}
+
+class StatsSnapshot {
+  final StatsModel stats;
+  final StatsDataSource source;
+  final DateTime fetchedAt;
+  final String? warning;
+
+  const StatsSnapshot({
+    required this.stats,
+    required this.source,
+    required this.fetchedAt,
+    this.warning,
+  });
+}
+
+enum StatsErrorCode {
+  liveUnavailable,
+}
+
+class StatsException implements Exception {
+  final String message;
+  final StatsErrorCode code;
+
+  const StatsException(this.message, {this.code = StatsErrorCode.liveUnavailable});
+
+  @override
+  String toString() => message;
 }
 

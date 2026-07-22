@@ -96,9 +96,16 @@ class PlanBadgeFromState extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (state == null) return const SizedBox.shrink();
-    if (state!.isPremium) return PremiumBadge(style: style, padding: padding);
-    if (state!.isTrial) return TrialBadge(daysLeft: state!.trialDaysLeft > 0 ? state!.trialDaysLeft : 0, style: style, padding: padding);
+    final s = state;
+    if (s == null) return const SizedBox.shrink();
+    if (s.isPremium) return PremiumBadge(style: style, padding: padding);
+    if (s.isTrial) {
+      return TrialBadge(
+        daysLeft: s.trialDaysLeft > 0 ? s.trialDaysLeft : 0,
+        style: style,
+        padding: padding,
+      );
+    }
     // Free only: show badgeLabel ("Free Plan — X / 2 used today"). Trial/premium never see this.
     final theme = Theme.of(context);
     final effectiveStyle = style ?? theme.textTheme.labelMedium?.copyWith(
@@ -113,7 +120,7 @@ class PlanBadgeFromState extends StatelessWidget {
           color: theme.colorScheme.primaryContainer.withValues(alpha: 0.7),
           borderRadius: BorderRadius.circular(20),
         ),
-        child: Text(state!.badgeLabel, style: effectiveStyle),
+        child: Text(s.badgeLabel, style: effectiveStyle),
       ),
     );
   }
@@ -134,13 +141,14 @@ class AiCreditBadge extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (state == null) return const SizedBox.shrink();
+    final s = state;
+    if (s == null) return const SizedBox.shrink();
     final theme = Theme.of(context);
     final effectiveStyle = style ?? theme.textTheme.labelMedium?.copyWith(
       color: theme.colorScheme.primary,
       fontWeight: FontWeight.w500,
     );
-    final isBlocked = state!.showLimitBanner;
+    final isBlocked = s.showLimitBanner;
     return Padding(
       padding: padding ?? const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
       child: Container(
@@ -152,7 +160,7 @@ class AiCreditBadge extends StatelessWidget {
           borderRadius: BorderRadius.circular(20),
         ),
         child: Text(
-          state!.badgeLabel,
+          s.badgeLabel,
           style: effectiveStyle?.copyWith(
             color: isBlocked ? theme.colorScheme.onErrorContainer : theme.colorScheme.onPrimaryContainer,
           ),

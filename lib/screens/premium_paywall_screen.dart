@@ -11,11 +11,11 @@ import '../models/user_model.dart';
 import '../services/play_billing_service.dart';
 import '../services/premium_service.dart';
 import '../services/subscription_service.dart';
-import '../services/premium_guard.dart';
 import '../services/ad_service.dart';
 import '../services/analytics_service.dart';
 import '../services/analytics_event_service.dart';
 import '../utils/connectivity_guard.dart';
+import '../utils/premium_activation_wait.dart';
 import '../utils/global_error_handler.dart';
 
 class PremiumPaywallScreen extends StatefulWidget {
@@ -26,6 +26,8 @@ class PremiumPaywallScreen extends StatefulWidget {
 }
 
 class _PremiumPaywallScreenState extends State<PremiumPaywallScreen> {
+  static const String _kFriendlyError = 'Something went wrong, try again';
+
   bool _isProcessing = false;
   UserModel? _userModel;
   bool _isLoadingUser = false;
@@ -57,7 +59,9 @@ class _PremiumPaywallScreenState extends State<PremiumPaywallScreen> {
     super.initState();
     if (kDebugMode) debugPrint('[Paywall] initState');
     AdService().setPaymentFlowActive(true);
-    WidgetsBinding.instance.addPostFrameCallback((_) {
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      await _billingService.initialize();
+      if (!mounted) return;
       AnalyticsService.logPaywallOpen();
       AnalyticsEventService().logPaywallOpen();
       _loadUserData();
@@ -113,7 +117,11 @@ class _PremiumPaywallScreenState extends State<PremiumPaywallScreen> {
         _isLoadingProducts = false;
         _productsLoadFailed = true;
       });
-      GlobalErrorHandler.showSnackBar(context, e);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text(_kFriendlyError), backgroundColor: Color(0xFFB00020)),
+        );
+      }
       _scheduleAutoRetry();
     }
   }
@@ -205,7 +213,9 @@ class _PremiumPaywallScreenState extends State<PremiumPaywallScreen> {
       if (mounted) setState(() => _isProcessing = false);
       if (mounted) {
         GlobalErrorHandler.log('PaywallLoad', e);
-        GlobalErrorHandler.showSnackBar(context, e);
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text(_kFriendlyError), backgroundColor: Color(0xFFB00020)),
+        );
       }
     }
   }
@@ -243,17 +253,16 @@ class _PremiumPaywallScreenState extends State<PremiumPaywallScreen> {
     }
 
     AnalyticsService.logPurchaseStarted(productId: product.id, price: plan.price);
-    AnalyticsEventService().logPurchaseStarted(
-      productId: product.id,
-      price: plan.price,
-    );
     final durationKey = plan.durationKey;
     AnalyticsEventService().logAnalyticsEventPurchaseStart(user.uid, durationKey);
 
     PlayBillingService.selectedDuration = durationKey;
+    PlayBillingService.lastPurchasePrice = plan.price;
+    PlayBillingService.lastPurchaseValue = AnalyticsService.parsePriceToValue(plan.price);
 
     setState(() => _isProcessing = true);
     try {
+      await _billingService.initialize();
       final productToPurchase = plan.productDetailsForPurchase ?? product;
       final success = await _billingService.purchaseSubscription(productToPurchase);
       if (!mounted) return;
@@ -265,26 +274,21 @@ class _PremiumPaywallScreenState extends State<PremiumPaywallScreen> {
             duration: Duration(seconds: 2),
           ),
         );
-        await Future.delayed(const Duration(seconds: 2));
-        await PremiumGuard().refresh(user.uid);
+        final activated = await PremiumActivationWait.poll(user.uid);
         if (!mounted) return;
-        final isPremium = await PremiumGuard().isPremium(user.uid);
-        if (isPremium) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(
-                content: Text('🎉 Premium activated successfully!'),
-                backgroundColor: Colors.green,
-              ),
-            );
+        if (activated) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(
+              content: Text('🎉 Premium activated successfully!'),
+              backgroundColor: Colors.green,
+            ),
+          );
           Navigator.pop(context);
           return;
         }
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Purchase is being processed. Please wait...'),
-            backgroundColor: Colors.blue,
-            duration: Duration(seconds: 3),
-          ),
+        await PremiumActivationWait.showPaymentReceivedDialog(
+          context,
+          onRestore: _restorePurchases,
         );
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -298,7 +302,9 @@ class _PremiumPaywallScreenState extends State<PremiumPaywallScreen> {
       if (kDebugMode) debugPrint('Purchase error: $e');
       if (!mounted) return;
       GlobalErrorHandler.log('PaywallPurchase', e);
-      GlobalErrorHandler.showSnackBar(context, e);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text(_kFriendlyError), backgroundColor: Color(0xFFB00020)),
+      );
       final msg = e.toString().toLowerCase();
       if (msg.contains('not available') || msg.contains('billing is not available')) {
         _showBillingUnavailableDialog();
@@ -394,12 +400,11 @@ class _PremiumPaywallScreenState extends State<PremiumPaywallScreen> {
         return;
       }
       await Future.delayed(const Duration(seconds: 2));
-      await PremiumGuard().refresh(user.uid);
       await _loadProducts();
+      final activated = await PremiumActivationWait.poll(user.uid);
       if (!mounted) return;
-      final isPremium = await PremiumGuard().isPremium(user.uid);
-      if (kDebugMode) debugPrint('[Paywall] restore result: isPremium=$isPremium');
-      if (isPremium) {
+      if (kDebugMode) debugPrint('[Paywall] restore result: activated=$activated');
+      if (activated) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
             content: Text('Purchase restored successfully'),
@@ -419,7 +424,9 @@ class _PremiumPaywallScreenState extends State<PremiumPaywallScreen> {
       if (kDebugMode) debugPrint('Restore error: $e');
       if (!mounted) return;
       GlobalErrorHandler.log('PaywallRestore', e);
-      GlobalErrorHandler.showSnackBar(context, e);
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text(_kFriendlyError), backgroundColor: Color(0xFFB00020)),
+      );
       final msg = e.toString().toLowerCase();
       if (msg.contains('not available') || msg.contains('billing is not available')) {
         _showBillingUnavailableDialog();

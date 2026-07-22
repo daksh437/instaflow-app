@@ -1,5 +1,6 @@
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:just_audio/just_audio.dart';
 import '../config/app_secrets.dart';
@@ -34,6 +35,7 @@ class _AIVoicePlayButtonState extends State<AIVoicePlayButton> {
   bool _isLoading = false;
   String? _sourceId;
   bool? _isPremium;
+  static const String _friendlyError = 'Something went wrong, try again';
 
   @override
   void initState() {
@@ -91,22 +93,28 @@ class _AIVoicePlayButtonState extends State<AIVoicePlayButton> {
     if (!AppSecrets.isTtsProxyConfigured) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('AI Voice not configured. Set TTS proxy.')),
+          const SnackBar(content: Text(_friendlyError)),
         );
       }
       return;
     }
 
     final key = widget.cacheKey ?? _cacheKeyFor(prepared, widget.languageCode);
+    if (kDebugMode) {
+      debugPrint('[VoiceOutput] requested source=$key textLen=${prepared.length}');
+    }
     if (_service.currentSourceId == key && !_isLoading) {
       await _service.playOrPause(key);
+      if (kDebugMode) {
+        debugPrint('[VoiceOutput] ${_service.isPlaying ? 'started' : 'stopped'} source=$key');
+      }
       if (mounted) setState(() {});
       return;
     }
 
     setState(() => _isLoading = true);
     try {
-      await _service.playText(
+      final result = await _service.playText(
         text: widget.textToSpeak,
         languageCode: widget.languageCode,
         cacheKey: key,
@@ -114,12 +122,26 @@ class _AIVoicePlayButtonState extends State<AIVoicePlayButton> {
           if (mounted) setState(() => _isLoading = loading);
         },
       );
+      if (result == null || result.isEmpty) {
+        if (kDebugMode) {
+          debugPrint('[VoiceOutput] failed_null_audio source=$key');
+        }
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text(_friendlyError)),
+          );
+        }
+        return;
+      }
+      if (kDebugMode) {
+        debugPrint('[VoiceOutput] ${_service.isPlaying ? 'started' : 'stopped'} source=$key');
+      }
       if (mounted) setState(() {});
     } catch (e) {
       if (mounted) {
         setState(() => _isLoading = false);
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Could not play AI voice')),
+          const SnackBar(content: Text(_friendlyError)),
         );
       }
     }

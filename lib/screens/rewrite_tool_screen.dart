@@ -1,8 +1,27 @@
 import 'package:flutter/material.dart';
+import '../widgets/ai_ad_banner.dart';
 import 'package:flutter/services.dart';
 import '../services/ai_service.dart';
+import '../services/analytics_service.dart';
 import '../services/history_service.dart';
+import '../services/ai_usage_control_service.dart';
+import '../utils/app_error_handler.dart';
+import '../utils/ai_usage_guard.dart';
+import '../widgets/ai_progressive_loading.dart';
 import 'history_screen.dart';
+
+class _RewriteQuickTopic {
+  const _RewriteQuickTopic(this.label, this.text);
+  final String label;
+  final String text;
+}
+
+const List<_RewriteQuickTopic> _kRewriteQuickTopics = [
+  _RewriteQuickTopic('Short', 'Check out our new drop — link in bio. Limited time only!'),
+  _RewriteQuickTopic('Long', 'We started this brand in a small room with one idea: make quality affordable. Today thank you for 10k followers — your support means everything.'),
+  _RewriteQuickTopic('Offer', 'Sale ends Sunday! 30% off sitewide. Use code SAVE30 at checkout.'),
+  _RewriteQuickTopic('Casual', 'POV: you finally found the skincare routine that actually works 😌'),
+];
 
 class RewriteToolScreen extends StatefulWidget {
   const RewriteToolScreen({super.key});
@@ -30,7 +49,10 @@ class _RewriteToolScreenState extends State<RewriteToolScreen> {
   Future<void> _generateAllTones() async {
     if (_inputController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter some text')),
+        const SnackBar(
+          content: Text('Paste text or tap a quick idea below.'),
+          backgroundColor: Colors.orange,
+        ),
       );
       return;
     }
@@ -43,12 +65,25 @@ class _RewriteToolScreenState extends State<RewriteToolScreen> {
 
     try {
       final inputText = _inputController.text.trim();
-      final rewrites = await _aiService.rewriteTextTones(inputText);
+      // Guard enforces freemium (trial/premium unlimited, free 2/day) and shows
+      // an interstitial ad after each output for non-premium users.
+      final rewrites = await runWithBackendAiGuard<Map<String, String>>(
+        context,
+        service: AiUsageControlService.instance,
+        onGenerate: () => _aiService.rewriteTextTones(inputText),
+      );
+      if (rewrites == null) {
+        if (mounted) setState(() => _isGenerating = false);
+        return; // limit reached / not logged in — guard already handled the UI
+      }
+      if (!mounted) return;
       setState(() {
         _generatedRewrites = rewrites;
         _selectedTone = rewrites.keys.first;
         _isGenerating = false;
       });
+
+      AnalyticsService.logAiToolUsed(toolId: 'rewrite_tool');
 
       // Save to history
       if (rewrites.isNotEmpty) {
@@ -59,20 +94,27 @@ class _RewriteToolScreenState extends State<RewriteToolScreen> {
           output: allRewrites,
           metadata: {'tones': rewrites.keys.toList()},
         );
+        if (!mounted) return;
       }
     } catch (e) {
       setState(() => _isGenerating = false);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Error: $e')),
-      );
+      await AppErrorHandler.log('RewriteTool', e);
+      if (!mounted) return;
+      AppErrorHandler.show(context, e);
     }
   }
 
-  void _copyToClipboard(String text) {
-    Clipboard.setData(ClipboardData(text: text));
+  Future<void> _copyToClipboard(String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    await AnalyticsService.logFirstAiResultCopiedOnce(toolId: 'rewrite_tool');
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Copied to clipboard!')),
+      const SnackBar(
+        content: Text('Copied — paste in Instagram.'),
+        backgroundColor: Color(0xFF7B2CBF),
+        behavior: SnackBarBehavior.floating,
+      ),
     );
   }
 
@@ -85,6 +127,7 @@ class _RewriteToolScreenState extends State<RewriteToolScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      bottomNavigationBar: const AiAdBanner(),
       backgroundColor: Colors.white,
       appBar: AppBar(
         title: const Text('AI Smart Rewrite'),
@@ -136,6 +179,41 @@ class _RewriteToolScreenState extends State<RewriteToolScreen> {
                 contentPadding: const EdgeInsets.all(20),
               ),
               style: const TextStyle(fontSize: 16, height: 1.5),
+              onChanged: (_) => setState(() {}),
+            ),
+
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Quick ideas',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey[800],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: _kRewriteQuickTopics.map((t) {
+                return ActionChip(
+                  label: Text(t.label),
+                  onPressed: () {
+                    setState(() {
+                      _inputController.text = t.text;
+                    });
+                  },
+                  backgroundColor: Colors.grey[100],
+                  side: BorderSide(color: Colors.grey[300]!),
+                  labelStyle: const TextStyle(
+                    fontSize: 13,
+                    color: Color(0xFF4A148C),
+                  ),
+                );
+              }).toList(),
             ),
 
             const SizedBox(height: 20),
@@ -176,7 +254,7 @@ class _RewriteToolScreenState extends State<RewriteToolScreen> {
                             child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
                           ),
                           SizedBox(width: 12),
-                          Text('Generating all tones... ✨'),
+                          Text('Rewriting…'),
                         ],
                       )
                     : const Row(
@@ -198,15 +276,9 @@ class _RewriteToolScreenState extends State<RewriteToolScreen> {
                   color: const Color(0xFF7B2CBF).withOpacity(0.05),
                   borderRadius: BorderRadius.circular(20),
                 ),
-                child: Column(
-                  children: [
-                    const CircularProgressIndicator(color: Color(0xFF7B2CBF)),
-                    const SizedBox(height: 16),
-                    Text(
-                      'Generating 5 tone variations...',
-                      style: TextStyle(fontSize: 16, color: Colors.grey[700]),
-                    ),
-                  ],
+                child: const AiProgressiveLoading(
+                  messages: ['Reading your text…', 'Rewriting in 5 tones…', 'Polishing variations…'],
+                  accentColor: Color(0xFF7B2CBF),
                 ),
               ),
             ],
@@ -298,6 +370,7 @@ class _RewriteToolScreenState extends State<RewriteToolScreen> {
                                 icon: const Icon(Icons.copy),
                                 onPressed: () => _copyToClipboard((_generatedRewrites ?? {})[_selectedTone] ?? ''),
                                 color: const Color(0xFF7B2CBF),
+                                tooltip: 'Copy',
                               ),
                             ],
                           ),
@@ -308,6 +381,20 @@ class _RewriteToolScreenState extends State<RewriteToolScreen> {
                               fontSize: 16,
                               height: 1.6,
                               color: Color(0xFF1A1A1A),
+                            ),
+                          ),
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            width: double.infinity,
+                            child: FilledButton.icon(
+                              onPressed: () => _copyToClipboard((_generatedRewrites ?? {})[_selectedTone] ?? ''),
+                              icon: const Icon(Icons.copy, size: 20),
+                              label: const Text('Copy this tone'),
+                              style: FilledButton.styleFrom(
+                                backgroundColor: const Color(0xFF7B2CBF),
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(vertical: 14),
+                              ),
                             ),
                           ),
                         ],

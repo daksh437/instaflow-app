@@ -69,7 +69,7 @@ class _SignupScreenState extends State<SignupScreen>
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
           content: Text(
-            "Welcome to InstaFlow ✨ Start your 7-day free trial now!",
+            "Welcome to InstaFlow ✨ Subscribe to unlock all AI tools!",
           ),
           backgroundColor: Colors.deepPurple,
         ),

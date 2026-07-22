@@ -105,7 +105,7 @@ class _AdminTrialUsersScreenState extends State<AdminTrialUsersScreen> {
               controller: _searchController,
               onChanged: _onSearch,
               decoration: InputDecoration(
-                hintText: 'Search by email',
+                hintText: 'Search by email or UID',
                 prefixIcon: const Icon(Icons.search),
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
                 filled: true,
@@ -128,7 +128,7 @@ class _AdminTrialUsersScreenState extends State<AdminTrialUsersScreen> {
                               return Card(
                                 margin: const EdgeInsets.only(bottom: 8),
                                 child: ListTile(
-                                  title: Text(u.email),
+                                  title: Text(u.identity),
                                   subtitle: Text(
                                     '${u.uid}\nTrial end: ${u.trialEnd != null ? DateFormat.yMd().format(u.trialEnd!) : "—"}\nLast active: ${u.lastActiveAt != null ? DateFormat.yMd().add_Hm().format(u.lastActiveAt!) : "—"} • AI: ${u.aiUsesToday}/${u.aiUsesTotal}',
                                     style: const TextStyle(fontSize: 12),

@@ -92,9 +92,19 @@ class NotificationService {
   Future<void> sendWelcomeNotification(String userId) async {
     await addNotification(
       userId: userId,
-      title: 'Welcome to InstaFlow!',
-      body: 'Your 7-day free trial has started. Explore all AI tools now!',
+      title: 'Welcome to InstaFlow! 🎉',
+      body: 'Your 3-day free trial is on — unlimited AI captions, hooks, reels & more.',
       type: 'welcome',
+    );
+  }
+
+  /// Nudge non-premium users toward subscribing (no free trial anymore).
+  Future<void> sendSubscribeReminderNotification(String userId) async {
+    await addNotification(
+      userId: userId,
+      title: 'Unlock InstaFlow Premium',
+      body: 'Get unlimited AI captions, hooks, reels & more. Subscribe to continue.',
+      type: 'subscribe_reminder',
     );
   }
 
@@ -227,6 +237,19 @@ class NotificationService {
     if (kDebugMode) debugPrint('Message opened: ${message.messageId}');
   }
 
+  /// Fetch and persist the FCM token for the current user. Safe to call after
+  /// login even when [initialize] already ran (its `_initialized` guard skips
+  /// re-setup, so a user who logged in *after* startup would otherwise never
+  /// get their token saved — which silently breaks admin push campaigns).
+  Future<void> syncFcmToken() async {
+    try {
+      final token = await _firebaseMessaging.getToken();
+      await _persistToken(token);
+    } catch (e) {
+      if (kDebugMode) debugPrint('syncFcmToken failed: $e');
+    }
+  }
+
   Future<void> _persistToken(String? token) async {
     if (token == null || token.isEmpty) return;
     final user = FirebaseAuth.instance.currentUser;
@@ -324,6 +347,95 @@ class NotificationService {
     await _localNotifications.cancelAll();
   }
 
+  // ─── Retention / engagement notifications (local, scheduled) ───────────────
+  // These bring users back and build a daily habit — the biggest retention
+  // lever. All local + scheduled (no server needed). ID ranges: daily 1000-1013,
+  // re-engagement 2000, onboarding tips 3000+.
+
+  static const List<String> _dailyValueMsgs = [
+    'Aaj ka viral hook ready hai 🔥 Tap karke apna next post banao',
+    'Aaj ke trending hashtags le lo — ek tap me ✨',
+    'New post idea ready! AI se caption + hashtags banao 📈',
+    'Aaj kya post karein? AI ke paas ready ideas hain 💡',
+    'Ek viral caption banao — 30 second me 🚀',
+    'Aaj ka content plan ready hai — kholo aur post karo ✍️',
+    'Trending reel hook aa gaya 🎬 Apne style me banao',
+  ];
+
+  static const List<String> _bestTimeMsgs = [
+    'Abhi best time hai post karne ka ⏰ Content ready karo!',
+    'Tumhare followers abhi active hain — post kar do 📲',
+    'Prime time! Ek reel/post daalo aur engagement badhao 🔥',
+  ];
+
+  static const List<List<String>> _onboardingTips = [
+    ['✨ Try this', 'Ek tap me scroll-stopping caption banao — AI Tools kholo'],
+    ['🎬 Did you know?', 'Poori Reel script ek tap me ban jaati hai — try karo!'],
+  ];
+
+  /// Schedule the next 7 days of daily-value (10 AM) + best-time (7 PM)
+  /// notifications with rotating copy. Call on app start/resume to keep it
+  /// topped up so the habit-forming reminders never run out.
+  Future<void> scheduleEngagementNotifications() async {
+    if (!_initialized) await initialize();
+    for (var i = 1000; i <= 1013; i++) {
+      await cancelNotification(i);
+    }
+    final now = DateTime.now();
+    for (var day = 0; day < 7; day++) {
+      final base = DateTime(now.year, now.month, now.day + day);
+      final morning = DateTime(base.year, base.month, base.day, 10, 0);
+      if (morning.isAfter(now)) {
+        await scheduleNotification(
+          id: 1000 + day,
+          title: '🔥 Content of the day',
+          body: _dailyValueMsgs[day % _dailyValueMsgs.length],
+          scheduledDate: morning,
+        );
+      }
+      final evening = DateTime(base.year, base.month, base.day, 19, 0);
+      if (evening.isAfter(now)) {
+        await scheduleNotification(
+          id: 1007 + day,
+          title: '⏰ Best time to post',
+          body: _bestTimeMsgs[day % _bestTimeMsgs.length],
+          scheduledDate: evening,
+        );
+      }
+    }
+    if (kDebugMode) debugPrint('[NotificationService] engagement notifications scheduled');
+  }
+
+  /// A "we miss you" nudge ~2 days out. Re-armed on every app open, so it only
+  /// actually fires when the user has been inactive for ~2 days.
+  Future<void> scheduleReEngagementNotification() async {
+    if (!_initialized) await initialize();
+    await cancelNotification(2000);
+    final t = DateTime.now().add(const Duration(days: 2));
+    final when = DateTime(t.year, t.month, t.day, 11, 0);
+    await scheduleNotification(
+      id: 2000,
+      title: 'We miss you 👋',
+      body: 'Tumhare followers wait kar rahe hain — aaj ka viral content 1 tap me banao ✨',
+      scheduledDate: when,
+    );
+  }
+
+  /// One-time feature-discovery tips on day 1 & day 2 after signup.
+  Future<void> scheduleOnboardingTips() async {
+    if (!_initialized) await initialize();
+    final now = DateTime.now();
+    for (var i = 0; i < _onboardingTips.length; i++) {
+      final when = DateTime(now.year, now.month, now.day + i + 1, 11, 30);
+      await scheduleNotification(
+        id: 3000 + i,
+        title: _onboardingTips[i][0],
+        body: _onboardingTips[i][1],
+        scheduledDate: when,
+      );
+    }
+  }
+
   // Send welcome notification to new user (local/push only; for in-app use sendWelcomeNotification(userId))
   Future<void> sendWelcomeLocalNotification() async {
     // Ensure service is initialized
@@ -336,21 +448,47 @@ class NotificationService {
     
     await showNotification(
       title: '🎉 Welcome to InstaFlow!',
-      body: 'Your 7-day free trial has started. Explore all AI tools now!',
+      body: '3 days of unlimited AI unlocked 🎁 Banao apna pehla viral caption abhi!',
     );
     if (kDebugMode) debugPrint('[NotificationService] Welcome notification sent');
   }
 
+  // Trial / premium lifecycle notification IDs. Kept in the 4000+ range so they
+  // never collide with the daily engagement block (1000-1013), which cancels &
+  // re-schedules its whole range on every app open.
+  static const int trialEndingWarningId = 4001;
+  static const int trialExpiredId = 4003;
+
+  /// New user just started a 3-day trial: greet them now and schedule the
+  /// "ending soon" (1 day before) + "expired" (at end) local notifications.
+  Future<void> scheduleTrialLifecycle(DateTime trialEndDate) async {
+    if (!_initialized) await initialize();
+    await showNotification(
+      title: '🎁 Your 3-day free trial is live!',
+      body: 'Unlimited AI captions, hooks & reels until ${_formatDate(trialEndDate)}. Enjoy!',
+    );
+    await scheduleTrialExpiryWarning(trialEndDate);
+    if (trialEndDate.isAfter(DateTime.now())) {
+      await scheduleNotification(
+        id: trialExpiredId,
+        title: 'Your free trial has ended',
+        body: 'You still get 2 free AI uses daily. Go Premium for unlimited ✨',
+        scheduledDate: trialEndDate,
+      );
+    }
+  }
+
   // Schedule trial expiry warning (1 day before)
   Future<void> scheduleTrialExpiryWarning(DateTime trialEndDate) async {
+    if (!_initialized) await initialize();
     final warningDate = trialEndDate.subtract(const Duration(days: 1));
-    
+
     // Only schedule if warning date is in the future
     if (warningDate.isAfter(DateTime.now())) {
       await scheduleNotification(
-        id: 1001, // Fixed ID for trial expiry warning
+        id: trialEndingWarningId,
         title: '⏰ Trial Ending Soon!',
-        body: 'Your free trial ends tomorrow. Subscribe now to keep all features!',
+        body: 'Your free trial ends tomorrow. Go Premium to keep unlimited AI!',
         scheduledDate: warningDate,
       );
       if (kDebugMode) debugPrint('[NotificationService] Scheduled trial expiry warning for: $warningDate');
@@ -376,12 +514,13 @@ class NotificationService {
 
   // Cancel trial expiry warning (if user upgrades before trial ends)
   Future<void> cancelTrialExpiryWarning() async {
-    await cancelNotification(1001);
+    await cancelNotification(trialEndingWarningId);
+    await cancelNotification(trialExpiredId);
     if (kDebugMode) debugPrint('[NotificationService] Cancelled trial expiry warning');
   }
 
   /// Schedule "Premium Ending Soon" 1 day before premiumExpiry.
-  static const int premiumExpiryWarningId = 1002;
+  static const int premiumExpiryWarningId = 4002;
 
   Future<void> schedulePremiumExpiryWarning(DateTime premiumExpiry) async {
     if (!_initialized) await initialize();

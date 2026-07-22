@@ -1,8 +1,10 @@
 import 'dart:io';
+import 'dart:math';
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/foundation.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 /// Stable device identifier and model for device binding and session guard.
 class DeviceService {
@@ -13,30 +15,40 @@ class DeviceService {
   final DeviceInfoPlugin _deviceInfo = DeviceInfoPlugin();
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
+  static const String _kDeviceIdKey = 'stable_device_id_v1';
+
   String? _cachedDeviceId;
   String? _cachedDeviceModel;
 
-  /// Returns a stable device ID (Android: androidId, iOS: identifierForVendor).
-  /// Cached for the app session.
+  /// Returns a **stable, persistent** device ID: a random id generated once and
+  /// stored in SharedPreferences. This survives app restarts (fixes users being
+  /// logged out on reopen — the old id was derived from build info / a timestamp
+  /// fallback and changed between launches, tripping the SessionGuard).
   Future<String> getDeviceId() async {
     if (_cachedDeviceId != null) return _cachedDeviceId!;
     try {
-      if (Platform.isAndroid) {
-        final android = await _deviceInfo.androidInfo;
-        _cachedDeviceId = android.id ?? 'android_unknown';
-      } else if (Platform.isIOS) {
-        final ios = await _deviceInfo.iosInfo;
-        _cachedDeviceId = ios.identifierForVendor ?? 'ios_unknown';
-      } else {
-        _cachedDeviceId = 'unknown_platform';
+      final prefs = await SharedPreferences.getInstance();
+      var id = prefs.getString(_kDeviceIdKey);
+      if (id == null || id.isEmpty) {
+        id = _generateStableId();
+        await prefs.setString(_kDeviceIdKey, id);
       }
-      return _cachedDeviceId!;
+      _cachedDeviceId = id;
+      return id;
     } catch (e, stack) {
       if (kDebugMode) debugPrint('[DeviceService] getDeviceId error: $e');
       FirebaseCrashlytics.instance.recordError(e, stack, fatal: false);
-      _cachedDeviceId = 'error_${DateTime.now().millisecondsSinceEpoch}';
+      // Constant fallback (NOT a timestamp) so it never triggers a false
+      // session mismatch on the same install.
+      _cachedDeviceId = 'device_fallback';
       return _cachedDeviceId!;
     }
+  }
+
+  String _generateStableId() {
+    final rand = Random.secure();
+    final bytes = List<int>.generate(16, (_) => rand.nextInt(256));
+    return bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
   }
 
   /// Human-readable device model (e.g. "Pixel 6", "iPhone14,2").

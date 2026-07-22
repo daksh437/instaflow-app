@@ -5,10 +5,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:firebase_crashlytics/firebase_crashlytics.dart';
 import 'device_service.dart';
-import 'auth_service.dart';
-import 'premium_guard.dart';
 
-/// Validates that the current device is the one bound to the user. If not, signs out and shows dialog.
+/// Keeps the device binding fresh. Never signs the user out on a device change
+/// (that logged legit users out on every reopen) — it silently re-binds instead.
 class SessionGuard {
   static final SessionGuard _instance = SessionGuard._internal();
   factory SessionGuard() => _instance;
@@ -17,7 +16,6 @@ class SessionGuard {
   final FirebaseAuth _auth = FirebaseAuth.instance;
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final DeviceService _deviceService = DeviceService();
-  final AuthService _authService = AuthService();
 
   /// Call on app start and on resume. If user is logged in and device mismatch, signs out and returns true (caller should show dialog).
   /// Returns false if no user or device matches. Never throws.
@@ -38,10 +36,15 @@ class SessionGuard {
       if (storedDeviceId == null || storedDeviceId.isEmpty) return false;
 
       if (storedDeviceId != currentDeviceId) {
-        if (kDebugMode) debugPrint('[SessionGuard] device mismatch: stored=$storedDeviceId current=$currentDeviceId');
-        PremiumGuard().invalidateCache();
-        await _authService.signOut();
-        return true;
+        // Previously this signed the user out — but the device id was not stable
+        // across restarts, so legit users were logged out every time they
+        // reopened the app. Instead, silently re-bind this device and keep the
+        // user signed in. (Server-side plan enforcement still protects revenue.)
+        if (kDebugMode) debugPrint('[SessionGuard] device changed: stored=$storedDeviceId current=$currentDeviceId → re-binding (no logout)');
+        try {
+          await _deviceService.bindDeviceAfterLogin(user.uid);
+        } catch (_) {}
+        return false;
       }
       return false;
     } on TimeoutException catch (e, stack) {

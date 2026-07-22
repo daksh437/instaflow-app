@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../widgets/ai_ad_banner.dart';
 import 'package:flutter/services.dart';
 import '../services/api_service.dart';
 import '../services/ai_usage_control_service.dart';
@@ -284,6 +285,7 @@ class _NicheAnalysisScreenState extends State<NicheAnalysisScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      bottomNavigationBar: const AiAdBanner(),
       appBar: AppBar(
         title: const Text('Niche Analysis'),
         backgroundColor: const Color(0xFF7B2CBF),

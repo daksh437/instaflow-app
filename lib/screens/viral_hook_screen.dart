@@ -1,7 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../widgets/ai_ad_banner.dart';
 import 'package:flutter/services.dart';
 import '../services/ai_service.dart';
+import '../services/analytics_service.dart';
 import '../services/ai_usage_control_service.dart';
 import '../services/history_service.dart';
 import '../utils/ai_usage_guard.dart';
@@ -12,6 +14,19 @@ import '../widgets/ai_plan_countdown.dart';
 import '../widgets/ai_progressive_loading.dart';
 import '../widgets/voice_play_button.dart';
 import 'history_screen.dart';
+
+class _HookQuickTopic {
+  const _HookQuickTopic(this.label, this.text);
+  final String label;
+  final String text;
+}
+
+const List<_HookQuickTopic> _kHookQuickTopics = [
+  _HookQuickTopic('Fitness', 'Home workouts and fat loss tips for beginners'),
+  _HookQuickTopic('Skincare', 'Affordable skincare routine for glowing skin'),
+  _HookQuickTopic('Motivation', 'Student and career motivation — stop procrastinating'),
+  _HookQuickTopic('Food', 'Quick healthy recipes under 15 minutes'),
+];
 
 class ViralHookScreen extends StatefulWidget {
   const ViralHookScreen({super.key});
@@ -45,7 +60,7 @@ class _ViralHookScreenState extends State<ViralHookScreen> {
     if (_topicController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Please enter a topic'),
+          content: Text('Enter a topic or tap a quick idea below.'),
           backgroundColor: Colors.orange,
         ),
       );
@@ -103,6 +118,8 @@ class _ViralHookScreenState extends State<ViralHookScreen> {
         _isGenerating = false;
       });
 
+      AnalyticsService.logAiToolUsed(toolId: 'viral_hook');
+
       // Save to history
       if (hooks.isNotEmpty) {
         await _historyService.saveHistory(
@@ -120,18 +137,36 @@ class _ViralHookScreenState extends State<ViralHookScreen> {
       });
       if (!mounted) return;
       
-      AppErrorHandler.log('ViralHookGenerate', e);
+      await AppErrorHandler.log('ViralHookGenerate', e);
+      if (!mounted) return;
       AppErrorHandler.show(context, e);
     }
   }
 
-  void _copyToClipboard(String text) {
-    Clipboard.setData(ClipboardData(text: text));
+  Future<void> _copyToClipboard(String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    await AnalyticsService.logFirstAiResultCopiedOnce(toolId: 'viral_hook');
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Hook copied!'),
+        content: Text('Copied — paste in Instagram.'),
         backgroundColor: Color(0xFF7B2CBF),
-        duration: Duration(seconds: 1),
+        behavior: SnackBarBehavior.floating,
+      ),
+    );
+  }
+
+  Future<void> _copyAllHooks() async {
+    if (_hooks.isEmpty) return;
+    final text = _hooks.join('\n');
+    await Clipboard.setData(ClipboardData(text: text));
+    await AnalyticsService.logFirstAiResultCopiedOnce(toolId: 'viral_hook');
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(
+        content: Text('Copied — paste in Instagram.'),
+        backgroundColor: Color(0xFF7B2CBF),
+        behavior: SnackBarBehavior.floating,
       ),
     );
   }
@@ -313,6 +348,7 @@ class _ViralHookScreenState extends State<ViralHookScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      bottomNavigationBar: const AiAdBanner(),
       backgroundColor: Colors.white,
       appBar: AppBar(
         title: const Text('Viral Hook Creator'),
@@ -384,7 +420,43 @@ class _ViralHookScreenState extends State<ViralHookScreen> {
                   contentPadding: const EdgeInsets.all(20),
                 ),
                 style: const TextStyle(fontSize: 16, height: 1.5),
+                onChanged: (_) => setState(() {}),
               ),
+            ),
+
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Quick ideas',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey[800],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: _kHookQuickTopics.map((t) {
+                return ActionChip(
+                  label: Text(t.label),
+                  onPressed: () {
+                    setState(() {
+                      _topicController.text = t.text;
+                    });
+                  },
+                  backgroundColor: Colors.grey[100],
+                  side: BorderSide(color: Colors.grey[300]!),
+                  labelStyle: const TextStyle(
+                    fontSize: 13,
+                    color: Color(0xFF4A148C),
+                    fontWeight: FontWeight.w500,
+                  ),
+                );
+              }).toList(),
             ),
 
             const SizedBox(height: 16),
@@ -471,13 +543,27 @@ class _ViralHookScreenState extends State<ViralHookScreen> {
                           ),
                         ),
                         child: _isGenerating
-                            ? const SizedBox(
-                                height: 24,
-                                width: 24,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
+                            ? const Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  SizedBox(
+                                    height: 22,
+                                    width: 22,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                  SizedBox(width: 12),
+                                  Text(
+                                    'Writing hooks…',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
                               )
                             : Row(
                                 mainAxisAlignment: MainAxisAlignment.center,
@@ -514,7 +600,11 @@ class _ViralHookScreenState extends State<ViralHookScreen> {
                   borderRadius: BorderRadius.circular(24),
                 ),
                 child: const AiProgressiveLoading(
-                  messages: ['Analyzing…', 'Generating hooks…', 'Optimizing output…'],
+                  messages: [
+                    'Reading your topic…',
+                    'Writing hooks…',
+                    'Almost ready…',
+                  ],
                   accentColor: Color(0xFF7B2CBF),
                 ),
               ),
@@ -528,6 +618,26 @@ class _ViralHookScreenState extends State<ViralHookScreen> {
                   fontSize: 20,
                   fontWeight: FontWeight.bold,
                   color: Color(0xFF1A1A1A),
+                ),
+              ),
+              const SizedBox(height: 12),
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: _copyAllHooks,
+                  icon: const Icon(Icons.copy_all_rounded, size: 22),
+                  label: const Text(
+                    'Copy all hooks',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF7B2CBF),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
                 ),
               ),
               const SizedBox(height: 16),

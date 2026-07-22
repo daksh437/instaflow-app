@@ -19,6 +19,7 @@ import 'api_service.dart';
 class AIService {
   // Get current user UID for history tracking
   String? get _currentUserId => FirebaseAuth.instance.currentUser?.uid;
+  Map<String, dynamic>? lastHashtagAdvice;
 
   /// Check if AI service is properly configured
   bool get isConfigured => AppSecrets.isAiConfigured;
@@ -642,6 +643,11 @@ CTA (12-15s):
 
   /// Generate hashtags for a topic
   Future<List<String>> generateHashtags(String topic) async {
+    final out = await generateHashtagsWithAdvice(topic);
+    return out['hashtags'] as List<String>;
+  }
+
+  Future<Map<String, dynamic>> generateHashtagsWithAdvice(String topic) async {
     validatePromptLength(topic, fieldName: 'Topic');
     try {
       // Use new backend API with job-based async pattern
@@ -676,6 +682,7 @@ CTA (12-15s):
       }
       
       List<String> hashtags = [];
+      Map<String, dynamic>? advice;
       
       if (data is List) {
         // Direct array of hashtags
@@ -691,6 +698,9 @@ CTA (12-15s):
       } else if (data is Map) {
         // Check for nested hashtags array
         if (data['hashtags'] is List) {
+          if (data['ai_advice'] is Map) {
+            advice = Map<String, dynamic>.from(data['ai_advice']);
+          }
           hashtags = (data['hashtags'] as List).map((h) {
             String tag = h.toString();
             if (!tag.startsWith('#')) {
@@ -713,7 +723,11 @@ CTA (12-15s):
       }
       
       print('[AI Service] ✅ Generated ${hashtags.length} hashtags: ${hashtags.take(5).join(", ")}...');
-      return hashtags;
+      lastHashtagAdvice = advice;
+      return {
+        'hashtags': hashtags,
+        'ai_advice': advice,
+      };
     } catch (e) {
       print('[AI Service] ❌ Error generating hashtags: $e');
       throw Exception('Failed to generate hashtags: ${e.toString()}');
@@ -1076,6 +1090,7 @@ CTA (12-15s):
         'hashtags': <String>[],
         'topics': <String>[],
         'ideas': <String>[],
+        'ai_advice': null,
       };
       
       if (data is Map) {
@@ -1110,6 +1125,9 @@ CTA (12-15s):
           trends['ideas'] = List<String>.from(ideasList);
         } else {
           trends['ideas'] = <String>[];
+        }
+        if (data['ai_advice'] is Map) {
+          trends['ai_advice'] = Map<String, dynamic>.from(data['ai_advice']);
         }
         
         print('[AI Service] ✅ Extracted trends from Map - hashtags: ${trends['hashtags'].length}, topics: ${trends['topics'].length}, ideas: ${trends['ideas'].length}');

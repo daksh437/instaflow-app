@@ -1,33 +1,29 @@
-/// Placeholder service for fetching Instagram Business profile and insights.
-/// Isolated from rest of app.
-///
-/// TODO: Insert Facebook App ID, Client Token, App Secret; wire Instagram Graph API (Insights).
-/// TODO: Use InstagramAuthService.getAccessToken(); get IG Business Account ID from me/accounts then call profile/insights.
+import 'instagram_service.dart';
 
-class IgProfileMock {
+class IgProfile {
   final String id;
   final String username;
-  final String? profilePictureUrl;
   final int followersCount;
   final int followsCount;
   final int mediaCount;
+  final String accountType;
 
-  const IgProfileMock({
+  const IgProfile({
     required this.id,
     required this.username,
-    this.profilePictureUrl,
     this.followersCount = 0,
     this.followsCount = 0,
     this.mediaCount = 0,
+    this.accountType = '',
   });
 }
 
-class IgInsightsMock {
+class IgInsights {
   final int reach;
   final int impressions;
   final int profileViews;
 
-  const IgInsightsMock({
+  const IgInsights({
     this.reach = 0,
     this.impressions = 0,
     this.profileViews = 0,
@@ -38,29 +34,27 @@ class InstagramInsightsService {
   InstagramInsightsService._();
   static final InstagramInsightsService _instance = InstagramInsightsService._();
   static InstagramInsightsService get instance => _instance;
+  final InstagramService _instagramService = InstagramService();
 
-  /// Fetch Instagram Business profile.
-  /// TODO: GET graph.facebook.com/v21.0/{ig-user-id}?fields=followers_count,follows_count,media_count,username,profile_picture_url
-  Future<IgProfileMock?> fetchProfile() async {
-    await Future.delayed(const Duration(milliseconds: 500));
-    return const IgProfileMock(
-      id: 'mock_ig_user_id',
-      username: 'mock_business_account',
-      profilePictureUrl: null,
-      followersCount: 12500,
-      followsCount: 320,
-      mediaCount: 84,
+  Future<IgProfile?> fetchProfile() async {
+    final profile = await _instagramService.getUserProfile('');
+    return IgProfile(
+      id: profile['id']?.toString() ?? '',
+      username: profile['username']?.toString() ?? '',
+      followersCount: (profile['followers_count'] as num?)?.toInt() ?? 0,
+      followsCount: (profile['follows_count'] as num?)?.toInt() ?? 0,
+      mediaCount: (profile['media_count'] as num?)?.toInt() ?? 0,
+      accountType: profile['account_type']?.toString() ?? '',
     );
   }
 
-  /// Fetch insights (reach, impressions, profile_views).
-  /// TODO: GET graph.facebook.com/v21.0/{ig-user-id}/insights?metric=impressions,reach,profile_views&period=day
-  Future<IgInsightsMock?> fetchInsights() async {
-    await Future.delayed(const Duration(milliseconds: 500));
-    return const IgInsightsMock(
-      reach: 8200,
-      impressions: 15200,
-      profileViews: 1100,
+  Future<IgInsights?> fetchInsights() async {
+    final profile = await fetchProfile();
+    if (profile == null) return null;
+    return const IgInsights(
+      reach: 0,
+      impressions: 0,
+      profileViews: 0,
     );
   }
 }

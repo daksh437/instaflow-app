@@ -1,13 +1,30 @@
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import '../widgets/ai_ad_banner.dart';
 import 'package:flutter/services.dart';
 import '../services/ai_service.dart';
+import '../services/analytics_service.dart';
 import '../services/ai_usage_control_service.dart';
 import '../services/history_service.dart';
 import '../utils/ai_usage_guard.dart';
+import '../utils/app_error_handler.dart';
 import '../widgets/ai_credit_badge.dart';
 import '../widgets/ai_plan_countdown.dart';
+import '../widgets/ai_progressive_loading.dart';
 import 'history_screen.dart';
+
+class _CarouselQuickTopic {
+  const _CarouselQuickTopic(this.label, this.text);
+  final String label;
+  final String text;
+}
+
+const List<_CarouselQuickTopic> _kCarouselQuickTopics = [
+  _CarouselQuickTopic('Tips', '5 quick tips for Instagram growth in 2025'),
+  _CarouselQuickTopic('Fitness', 'Beginner home workout mistakes to avoid'),
+  _CarouselQuickTopic('Food', 'Easy healthy breakfast ideas under 10 minutes'),
+  _CarouselQuickTopic('Business', '3 habits every small business owner needs'),
+];
 
 class CarouselWriterScreen extends StatefulWidget {
   const CarouselWriterScreen({super.key});
@@ -40,7 +57,7 @@ class _CarouselWriterScreenState extends State<CarouselWriterScreen> {
     if (_topicController.text.trim().isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(
-          content: Text('Please enter a topic'),
+          content: Text('Enter a topic or tap a quick idea below.'),
           backgroundColor: Colors.orange,
         ),
       );
@@ -74,6 +91,8 @@ class _CarouselWriterScreenState extends State<CarouselWriterScreen> {
         _isGenerating = false;
       });
 
+      AnalyticsService.logAiToolUsed(toolId: 'carousel_writer');
+
       // Save to history
       if (carousel.isNotEmpty) {
         final carouselOutput = 'Title: ${carousel['title']}\n\nSlides:\n${(carousel['slides'] as List).map((s) => 'Slide ${(carousel['slides'] as List).indexOf(s) + 1}: ${s['text']}').join('\n\n')}';
@@ -88,27 +107,42 @@ class _CarouselWriterScreenState extends State<CarouselWriterScreen> {
       if (kDebugMode) debugPrint('[CarouselWriter] ❌ Error: $e');
       setState(() => _isGenerating = false);
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text(
-            e.toString().contains('unavailable') || e.toString().contains('Failed')
-                ? 'AI service error: ${e.toString()}'
-                : 'Error generating carousel: ${e.toString()}',
-          ),
-          backgroundColor: Colors.red,
-          duration: const Duration(seconds: 5),
-        ),
-      );
+      await AppErrorHandler.log('CarouselWriter', e);
+      if (!mounted) return;
+      AppErrorHandler.show(context, e);
     }
   }
 
-  void _copyToClipboard(String text) {
-    Clipboard.setData(ClipboardData(text: text));
+  String _fullCarouselPlainText() {
+    final data = _carouselData;
+    if (data == null) return '';
+    final title = data['title']?.toString() ?? '';
+    final caption = data['caption']?.toString() ?? '';
+    final slides = data['slides'] as List<dynamic>? ?? [];
+    final buf = StringBuffer()
+      ..writeln(title)
+      ..writeln()
+      ..writeln(caption)
+      ..writeln();
+    for (var i = 0; i < slides.length; i++) {
+      final s = slides[i] as Map<String, dynamic>;
+      final body = s['content']?.toString() ?? s['text']?.toString() ?? '';
+      buf.writeln('Slide ${i + 1}: ${s['title'] ?? ''}');
+      buf.writeln(body);
+      buf.writeln();
+    }
+    return buf.toString().trim();
+  }
+
+  Future<void> _copyToClipboard(String text) async {
+    await Clipboard.setData(ClipboardData(text: text));
+    await AnalyticsService.logFirstAiResultCopiedOnce(toolId: 'carousel_writer');
+    if (!mounted) return;
     ScaffoldMessenger.of(context).showSnackBar(
       const SnackBar(
-        content: Text('Copied to clipboard!'),
+        content: Text('Copied — paste in Instagram.'),
         backgroundColor: Color(0xFF7B2CBF),
-        duration: Duration(seconds: 1),
+        behavior: SnackBarBehavior.floating,
       ),
     );
   }
@@ -284,6 +318,7 @@ class _CarouselWriterScreenState extends State<CarouselWriterScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
+      bottomNavigationBar: const AiAdBanner(),
       backgroundColor: Colors.white,
       appBar: AppBar(
         title: const Text('AI Carousel Writer'),
@@ -355,7 +390,43 @@ class _CarouselWriterScreenState extends State<CarouselWriterScreen> {
                   contentPadding: const EdgeInsets.all(20),
                 ),
                 style: const TextStyle(fontSize: 16, height: 1.5),
+                onChanged: (_) => setState(() {}),
               ),
+            ),
+
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerLeft,
+              child: Text(
+                'Quick ideas',
+                style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey[800],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: _kCarouselQuickTopics.map((t) {
+                return ActionChip(
+                  label: Text(t.label),
+                  onPressed: () {
+                    setState(() {
+                      _topicController.text = t.text;
+                    });
+                  },
+                  backgroundColor: Colors.grey[100],
+                  side: BorderSide(color: Colors.grey[300]!),
+                  labelStyle: const TextStyle(
+                    fontSize: 13,
+                    color: Color(0xFF4A148C),
+                    fontWeight: FontWeight.w500,
+                  ),
+                );
+              }).toList(),
             ),
 
             const SizedBox(height: 16),
@@ -442,13 +513,27 @@ class _CarouselWriterScreenState extends State<CarouselWriterScreen> {
                           ),
                         ),
                         child: _isGenerating
-                            ? const SizedBox(
-                                height: 24,
-                                width: 24,
-                                child: CircularProgressIndicator(
-                                  strokeWidth: 2,
-                                  color: Colors.white,
-                                ),
+                            ? const Row(
+                                mainAxisAlignment: MainAxisAlignment.center,
+                                children: [
+                                  SizedBox(
+                                    height: 22,
+                                    width: 22,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                  SizedBox(width: 12),
+                                  Text(
+                                    'Building your carousel…',
+                                    style: TextStyle(
+                                      fontSize: 16,
+                                      fontWeight: FontWeight.bold,
+                                      color: Colors.white,
+                                    ),
+                                  ),
+                                ],
                               )
                             : Row(
                                 mainAxisAlignment: MainAxisAlignment.center,
@@ -484,25 +569,40 @@ class _CarouselWriterScreenState extends State<CarouselWriterScreen> {
                   color: const Color(0xFF7B2CBF).withOpacity(0.05),
                   borderRadius: BorderRadius.circular(24),
                 ),
-                child: Column(
-                  children: [
-                    const CircularProgressIndicator(color: Color(0xFF7B2CBF)),
-                    const SizedBox(height: 16),
-                    Text(
-                      'Creating carousel content... ✨',
-                      style: TextStyle(
-                        fontSize: 16,
-                        color: Colors.grey[700],
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
+                child: const AiProgressiveLoading(
+                  messages: [
+                    'Planning slides…',
+                    'Writing your carousel…',
+                    'Polishing copy…',
                   ],
+                  accentColor: Color(0xFF7B2CBF),
                 ),
               ),
             ],
 
             if (_carouselData != null) ...[
               const SizedBox(height: 32),
+
+              SizedBox(
+                width: double.infinity,
+                child: FilledButton.icon(
+                  onPressed: () => _copyToClipboard(_fullCarouselPlainText()),
+                  icon: const Icon(Icons.copy_all_rounded, size: 22),
+                  label: const Text(
+                    'Copy full carousel',
+                    style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                  ),
+                  style: FilledButton.styleFrom(
+                    backgroundColor: const Color(0xFF7B2CBF),
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(14),
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(height: 16),
               
               // Save Button
               Row(

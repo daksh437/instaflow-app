@@ -1,6 +1,5 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:just_audio/just_audio.dart';
@@ -22,9 +21,6 @@ class GoogleCloudTtsService {
   Stream<PlayerState> get playerStateStream => _player.playerStateStream;
   bool get isPlaying => _player.playing;
   String? get currentSourceId => _currentSourceId;
-
-  static const String _voiceEn = 'en-IN-Neural2-A';
-  static const String _voiceHi = 'hi-IN-Neural2-A';
 
   Future<void> stop() async {
     try {
@@ -61,12 +57,6 @@ class GoogleCloudTtsService {
     }
   }
 
-  String _voiceNameFor(String languageCode) {
-    final code = (languageCode.isEmpty ? 'en-IN' : languageCode).toLowerCase();
-    if (code.startsWith('hi')) return _voiceHi;
-    return _voiceEn;
-  }
-
   Future<String?> getOrFetchAudioPath({
     required String text,
     String languageCode = 'en-IN',
@@ -86,9 +76,17 @@ class GoogleCloudTtsService {
     final file = File(filePath);
     if (await file.exists()) return filePath;
     final bytes = await _fetchAudioBytes(prepared, languageCode);
-    if (bytes == null || bytes.isEmpty) return null;
-    await file.writeAsBytes(bytes);
-    return filePath;
+    if (bytes == null || bytes.isEmpty) {
+      if (kDebugMode) debugPrint('[GoogleCloudTts] empty audio bytes');
+      return null;
+    }
+    try {
+      await file.writeAsBytes(bytes);
+      return filePath;
+    } catch (e) {
+      if (kDebugMode) debugPrint('[GoogleCloudTts] write cache failed: $e');
+      return null;
+    }
   }
 
   Future<String?> playText({
@@ -104,7 +102,10 @@ class GoogleCloudTtsService {
         languageCode: languageCode,
         cacheKey: cacheKey,
       );
-      if (path == null) return null;
+      if (path == null) {
+        if (kDebugMode) debugPrint('[GoogleCloudTts] playText path null');
+        return null;
+      }
       final key = cacheKey ?? _cacheKeyFor(prepareTextForSpeech(text), languageCode);
       _pathCache[key] = path;
       await stop();
@@ -128,19 +129,30 @@ class GoogleCloudTtsService {
       'languageCode': languageCode.isEmpty ? 'en-IN' : languageCode,
     });
     try {
+      if (kDebugMode) {
+        debugPrint('[GoogleCloudTts] request url=$baseUrl textLen=${text.length} lang=$languageCode');
+      }
       final response = await http.post(
         url,
         headers: {'Content-Type': 'application/json', 'Accept': 'application/json'},
         body: body,
       );
       if (response.statusCode != 200) {
-        if (kDebugMode) debugPrint('[GoogleCloudTts] proxy ${response.statusCode}: ${response.body}');
+        if (kDebugMode) debugPrint('[GoogleCloudTts] proxy status=${response.statusCode}');
         return null;
       }
       final json = jsonDecode(response.body) as Map<String, dynamic>?;
       final base64 = json?['audioContent'] as String?;
-      if (base64 == null || base64.isEmpty) return null;
-      return Uint8List.fromList(base64Decode(base64));
+      if (base64 == null || base64.isEmpty) {
+        if (kDebugMode) debugPrint('[GoogleCloudTts] missing audioContent');
+        return null;
+      }
+      try {
+        return Uint8List.fromList(base64Decode(base64));
+      } catch (e) {
+        if (kDebugMode) debugPrint('[GoogleCloudTts] base64 decode failed: $e');
+        return null;
+      }
     } catch (e) {
       if (kDebugMode) debugPrint('[GoogleCloudTts] fetch: $e');
       return null;

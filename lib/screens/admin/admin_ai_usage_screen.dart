@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import '../../models/admin_user_row.dart';
+import '../../models/ai_usage_log_row.dart';
 import '../../services/admin_dashboard_service.dart';
 import '../../utils/admin_guard.dart';
 import '../../utils/app_error_handler.dart';
@@ -22,8 +22,7 @@ class _AdminAIUsageScreenState extends State<AdminAIUsageScreen> {
   bool _isAdmin = false;
   bool _loading = true;
   String? _error;
-  List<AdminUserRow> _list = [];
-  int _page = 0;
+  List<AiUsageLogRow> _list = [];
   String _search = '';
 
   @override
@@ -59,7 +58,7 @@ class _AdminAIUsageScreenState extends State<AdminAIUsageScreen> {
       _error = null;
     });
     try {
-      final list = await _service.getTodayAiUsagePage(limit: 30, page: _page, search: _search);
+      final list = await _service.getTodayAiUsageLogs(search: _search);
       if (!mounted) return;
       setState(() {
         _list = list;
@@ -80,7 +79,6 @@ class _AdminAIUsageScreenState extends State<AdminAIUsageScreen> {
   void _onSearch(String value) {
     setState(() {
       _search = value;
-      _page = 0;
     });
     _load();
   }
@@ -105,7 +103,7 @@ class _AdminAIUsageScreenState extends State<AdminAIUsageScreen> {
               controller: _searchController,
               onChanged: _onSearch,
               decoration: InputDecoration(
-                hintText: 'Search by email',
+                hintText: 'Search by email or tool',
                 prefixIcon: const Icon(Icons.search),
                 border: OutlineInputBorder(borderRadius: BorderRadius.circular(12)),
                 filled: true,
@@ -120,25 +118,54 @@ class _AdminAIUsageScreenState extends State<AdminAIUsageScreen> {
                     ? ErrorRetryCard(message: _error, onRetry: _load)
                     : _list.isEmpty
                         ? const Center(child: Text('No AI usage today'))
-                        : ListView.builder(
-                            padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
-                            itemCount: _list.length,
-                            itemBuilder: (context, i) {
-                              final u = _list[i];
-                              return Card(
-                                margin: const EdgeInsets.only(bottom: 8),
-                                child: ListTile(
-                                  title: Text(u.email),
-                                  subtitle: Text(
-                                    '${u.uid}\nPlan: ${u.plan} • Today: ${u.aiUsesToday} • Total: ${u.aiUsesTotal}\nLast active: ${u.lastActiveAt != null ? DateFormat.yMd().add_Hm().format(u.lastActiveAt!) : "—"}',
-                                    style: const TextStyle(fontSize: 12),
-                                    maxLines: 4,
-                                    overflow: TextOverflow.ellipsis,
+                        : Column(
+                            children: [
+                              Padding(
+                                padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+                                child: Align(
+                                  alignment: Alignment.centerLeft,
+                                  child: Text(
+                                    '${_list.length} AI use${_list.length == 1 ? '' : 's'} today',
+                                    style: TextStyle(
+                                      color: Colors.grey[700],
+                                      fontWeight: FontWeight.w600,
+                                    ),
                                   ),
-                                  isThreeLine: true,
                                 ),
-                              );
-                            },
+                              ),
+                              Expanded(
+                                child: ListView.builder(
+                                  padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                                  itemCount: _list.length,
+                                  itemBuilder: (context, i) {
+                                    final r = _list[i];
+                                    return Card(
+                                      margin: const EdgeInsets.only(bottom: 8),
+                                      child: ListTile(
+                                        leading: const CircleAvatar(
+                                          backgroundColor: Color(0xFFEDE3FF),
+                                          child: Icon(Icons.smart_toy_rounded,
+                                              color: Color(0xFF7B2CBF), size: 20),
+                                        ),
+                                        title: Text(
+                                          r.identity,
+                                          style: const TextStyle(
+                                              fontWeight: FontWeight.w600, fontSize: 14),
+                                        ),
+                                        subtitle: Text(
+                                          'Tool: ${r.toolName}'
+                                          '${r.plan.isNotEmpty ? ' • ${r.plan}' : ''}\n'
+                                          '${r.usedAt != null ? DateFormat.yMd().add_jm().format(r.usedAt!) : "—"}',
+                                          style: const TextStyle(fontSize: 12),
+                                          maxLines: 2,
+                                        ),
+                                        isThreeLine: true,
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ),
+                            ],
                           ),
           ),
         ],

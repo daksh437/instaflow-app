@@ -9,6 +9,17 @@ import 'analytics_firestore_service.dart';
 import 'analytics_service.dart';
 import 'notification_service.dart';
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Firestore users/{uid} — premium / plan fields (single mental model)
+// ═══════════════════════════════════════════════════════════════════════════
+// Authority for AI/backend: backend planResolver uses premiumExpiry > now, then
+//   trial end, else free. planType on the doc is synced by getAiAccess when needed.
+// Client UI (UserModel, SubscriptionScreen): reads subscriptionPlan string
+//   (trial|free|pro|ultra); set on every activation path with premiumExpiry/planType.
+// Optional: isPremium, premiumProductId; subscription map holds purchaseToken for
+//   future Google Play server verification — subscription.verified true only via Admin/CF.
+// ═══════════════════════════════════════════════════════════════════════════
+
 class PremiumService {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
 
@@ -75,6 +86,17 @@ class PremiumService {
   /// Alias: is premium active (not expired)
   static bool isPremiumActive(UserModel user) => hasActivePremium(user);
 
+  /// Raw Firestore user doc map — premium active if `premiumExpiry` is in the future.
+  static bool isPremiumActiveFromDoc(Map<String, dynamic>? userData) {
+    if (userData == null) return false;
+    final exp = (userData['premiumExpiry'] as Timestamp?)?.toDate();
+    if (exp == null) return false;
+    return exp.isAfter(DateTime.now());
+  }
+
+  /// Same as [checkPremiumExpiry] — downgrade when [premiumExpiry] is in the past.
+  Future<void> checkAndExpirePremium(String uid) => checkPremiumExpiry(uid);
+
   /// Alias: is trial currently active
   static bool trialActive(UserModel user) => isTrialOngoing(user);
 
@@ -118,6 +140,8 @@ class PremiumService {
       
       if (userDoc.exists) {
         await _firestore.collection('users').doc(uid).set({
+          'planType': 'trial',
+          'subscriptionPlan': 'trial',
           'isTrialActive': true,
           'trialStart': Timestamp.fromDate(now),
           'trialEnd': Timestamp.fromDate(trialEnd),
@@ -133,6 +157,7 @@ class PremiumService {
           'email': authUser?.email ?? '',
           'displayName': authUser?.displayName,
           'photoURL': authUser?.photoURL,
+          'planType': 'trial',
           'subscriptionPlan': 'trial',
           'createdAt': FieldValue.serverTimestamp(),
           'preferences': {},
@@ -166,6 +191,8 @@ class PremiumService {
     try {
       final updates = <String, dynamic>{
         'isPremium': true,
+        'planType': 'premium',
+        'subscriptionPlan': 'pro',
         'premiumStart': FieldValue.serverTimestamp(),
         'premiumExpiry': Timestamp.fromDate(expiry),
         'planDuration': durationMonths,
@@ -206,6 +233,8 @@ class PremiumService {
       if (now.isAfter(premiumExpiry)) {
         await _firestore.collection('users').doc(uid).update({
           'isPremium': false,
+          'planType': 'free',
+          'subscriptionPlan': 'free',
           'premiumPlan': 'none',
           'premiumDuration': 'none',
           'premiumExpiry': null,
@@ -311,6 +340,8 @@ class PremiumService {
     final hadTrial = doc.exists && doc.data()?['trialStart'] != null;
     final updates = <String, dynamic>{
       'isPremium': true,
+      'planType': 'premium',
+      'subscriptionPlan': 'pro',
       'premiumPlan': plan,
       'premiumDuration': duration,
       'subscriptionType': subscriptionType,
@@ -332,10 +363,146 @@ class PremiumService {
     if (kDebugMode) debugPrint('[PremiumService] activatePremiumWithPlan: expiry=$expiry, notification scheduled (expiry - 1 day)');
   }
 
+  /// Single entry from [PlayBillingService]: receipt + entitlement. Returns false on Firestore failure (logged).
+  Future<bool> activatePremiumFromPlayPurchase({
+    required String uid,
+    required String productId,
+    required String purchaseToken,
+    required int purchaseTimeMillis,
+    DateTime? transactionDate,
+    required String durationKey,
+    required String purchaseStatus,
+    String platform = 'android',
+  }) async {
+    // GATE: never activate premium on a clearly-FAILED payment state. We block
+    // only known failure statuses (pending / canceled / error) and allow
+    // everything else (purchased, restored, or an unexpected/empty value), so a
+    // real paying user is NEVER wrongly denied premium. The purchase stream
+    // already forwards only purchased/restored here — this is defense-in-depth.
+    const failedStatuses = {'pending', 'canceled', 'cancelled', 'error'};
+    final normalizedStatus = purchaseStatus.trim().toLowerCase();
+    if (failedStatuses.contains(normalizedStatus)) {
+      if (kDebugMode) {
+        debugPrint(
+          '[PremiumService] activatePremiumFromPlayPurchase: REFUSING activation — '
+          'purchaseStatus="$purchaseStatus" is a failed payment state '
+          '(uid=$uid productId=$productId)',
+        );
+      }
+      return false;
+    }
+
+    try {
+      await submitPurchaseToFirestore(
+        uid: uid,
+        productId: productId,
+        purchaseToken: purchaseToken,
+        purchaseTimeMillis: purchaseTimeMillis,
+        transactionDate: transactionDate,
+        platform: platform,
+        markVerifiedAndActivate: false,
+        duration: durationKey,
+      );
+      if (kDebugMode) {
+        debugPrint(
+          '[PremiumService] activatePremiumFromPlayPurchase: receipt saved uid=$uid '
+          'productId=$productId token=${purchaseToken.isNotEmpty ? "present" : "empty"}',
+        );
+      }
+    } catch (e, stack) {
+      // Saving the receipt is SECONDARY — do NOT block premium activation if it
+      // fails. The real entitlement write happens below; a paid user must get
+      // premium even if the receipt write hit a transient error.
+      if (kDebugMode) {
+        debugPrint('[PremiumService] submitPurchaseToFirestore FAILED (continuing to activate): $e');
+      }
+      try {
+        FirebaseCrashlytics.instance.recordError(e, stack, fatal: false);
+      } catch (_) {}
+    }
+
+    // RESTORE path: do NOT grant premium locally. A restore can surface a Play
+    // purchase made on a DIFFERENT app account (subscriptions are tied to the
+    // device's Play account, not the Firebase login). Ownership is decided
+    // server-side in /check-ai-access — the backend binds each purchase token to
+    // the first account that claims it and only activates premium for that
+    // owner. Here we just persist the receipt (above) and let the server decide,
+    // so a non-owner account never flashes into premium on login/restore.
+    if (normalizedStatus == 'restored') {
+      if (kDebugMode) {
+        debugPrint('[PremiumService] restore — receipt saved, deferring premium to server (ownership) uid=$uid');
+      }
+      return true;
+    }
+
+    try {
+      await _activatePremiumByProductIdWithRetry(
+        uid,
+        productId,
+        duration: durationKey,
+        purchaseStatus: purchaseStatus,
+        purchaseToken: purchaseToken,
+        purchaseTimeMillis: purchaseTimeMillis,
+      );
+      if (kDebugMode) debugPrint('[PremiumService] activatePremiumFromPlayPurchase: Firestore premium OK uid=$uid');
+      return true;
+    } catch (e, stack) {
+      if (kDebugMode) {
+        debugPrint(
+          '[PremiumService] activatePremiumFromPlayPurchase FAILED after retry uid=$uid '
+          'productId=$productId token=${purchaseToken.isNotEmpty ? "present" : "empty"}: $e',
+        );
+      }
+      try {
+        FirebaseCrashlytics.instance.recordError(e, stack, fatal: false);
+      } catch (_) {}
+      return false;
+    }
+  }
+
+  Future<void> _activatePremiumByProductIdWithRetry(
+    String uid,
+    String productId, {
+    String? duration,
+    String? purchaseStatus,
+    String? purchaseToken,
+    int? purchaseTimeMillis,
+  }) async {
+    Object? lastError;
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        await activatePremiumByProductId(
+          uid,
+          productId,
+          duration: duration,
+          purchaseStatus: purchaseStatus,
+          purchaseToken: purchaseToken,
+          purchaseTimeMillis: purchaseTimeMillis,
+        );
+        final doc = await _firestore.collection('users').doc(uid).get();
+        final exp = (doc.data()?['premiumExpiry'] as Timestamp?)?.toDate();
+        if (exp != null && exp.isAfter(DateTime.now())) return;
+        lastError = StateError('premiumExpiry missing or expired after activation attempt ${attempt + 1}');
+        if (kDebugMode) debugPrint('[PremiumService] $lastError uid=$uid');
+      } catch (e) {
+        lastError = e;
+        if (kDebugMode) debugPrint('[PremiumService] activatePremiumByProductId attempt ${attempt + 1} error: $e');
+      }
+    }
+    throw lastError ?? StateError('activatePremiumByProductId failed');
+  }
+
   /// Activate premium from purchase/restore/renewal.
   /// productId is always premium_monthly; duration (1m, 3m, 6m, 12m) comes from selected base plan.
   /// duration: optional — when productId is premium_monthly, use this to get days (1m=30, 3m=90, 6m=180, 12m=365).
-  Future<void> activatePremiumByProductId(String uid, String productId, {String? duration}) async {
+  Future<void> activatePremiumByProductId(
+    String uid,
+    String productId, {
+    String? duration,
+    String? purchaseStatus,
+    String? purchaseToken,
+    int? purchaseTimeMillis,
+  }) async {
     int days = 30;
     if (productId == 'premium_monthly' && duration != null) {
       const durationDays = {'1m': 30, '3m': 90, '6m': 180, '12m': 365};
@@ -363,15 +530,62 @@ class PremiumService {
 
     bool isRenewal = false;
     DateTime expiry = now.add(Duration(days: days));
+    DateTime? previousExpiry;
+    bool isPremiumNow = false;
+    String? storedProductId;
+    String? lastProcessedToken;
+    int? lastProcessedTime;
 
     if (doc.exists) {
       final data = doc.data();
       if (data != null) {
         final currentExpiry = (data['premiumExpiry'] as Timestamp?)?.toDate();
-        final storedProductId = data['premiumProductId'] as String?;
-        final isPremium = data['isPremium'] ?? false;
+        previousExpiry = currentExpiry;
+        storedProductId = data['premiumProductId'] as String?;
+        isPremiumNow = data['isPremium'] == true;
+        lastProcessedToken = data['lastProcessedPurchaseToken'] as String?;
+        final rawProcessedTime = data['lastProcessedPurchaseTime'];
+        if (rawProcessedTime is int) {
+          lastProcessedTime = rawProcessedTime;
+        } else if (rawProcessedTime is num) {
+          lastProcessedTime = rawProcessedTime.toInt();
+        }
 
-        if (isPremium &&
+        final hasToken = purchaseToken != null && purchaseToken.trim().isNotEmpty;
+        final sameToken = hasToken && lastProcessedToken == purchaseToken!.trim();
+        final sameTime = purchaseTimeMillis != null && lastProcessedTime != null && purchaseTimeMillis == lastProcessedTime;
+        final dedupeHit = sameToken && sameTime;
+        if (dedupeHit &&
+            isPremiumNow &&
+            currentExpiry != null &&
+            currentExpiry.isAfter(now)) {
+          if (kDebugMode) {
+            debugPrint(
+              '[PremiumService] dedupe hit uid=$uid status=$purchaseStatus token=(same) time=$purchaseTimeMillis '
+              'expiryBefore=$currentExpiry -> skip mutation',
+            );
+          }
+          return;
+        }
+        if (dedupeHit && (currentExpiry == null || !currentExpiry.isAfter(now))) {
+          if (kDebugMode) {
+            debugPrint(
+              '[PremiumService] dedupe token/time match but premiumExpiry missing/expired — re-activating uid=$uid',
+            );
+          }
+        }
+
+        if (purchaseStatus == 'restored' && currentExpiry != null && currentExpiry.isAfter(now)) {
+          // Restore should reattach entitlement, not extend future expiry.
+          isRenewal = false;
+          expiry = currentExpiry;
+          if (kDebugMode) {
+            debugPrint(
+              '[PremiumService] restore detected: keeping existing expiry=$currentExpiry '
+              '(token=${purchaseToken?.isNotEmpty == true ? "present" : "empty"} time=$purchaseTimeMillis)',
+            );
+          }
+        } else if (isPremiumNow &&
             storedProductId == productId &&
             currentExpiry != null &&
             currentExpiry.isAfter(now)) {
@@ -390,41 +604,91 @@ class PremiumService {
     }
 
     if (isRenewal) {
-      await docRef.update({
-        'premiumExpiry': Timestamp.fromDate(expiry),
-        'premiumExpiryNotified': false,
-        'lastUpdated': FieldValue.serverTimestamp(),
-      });
+      try {
+        await docRef.update({
+          'isPremium': true,
+          'premiumExpiry': Timestamp.fromDate(expiry),
+          'premiumExpiryNotified': false,
+          'planType': 'premium',
+          'subscriptionPlan': 'pro',
+          'premiumProductId': productId,
+          if (purchaseToken != null && purchaseToken.trim().isNotEmpty) ...{
+            'lastProcessedPurchaseToken': purchaseToken.trim(),
+            'subscriptionPurchaseToken': purchaseToken.trim(),
+          },
+          if (purchaseTimeMillis != null) 'lastProcessedPurchaseTime': purchaseTimeMillis,
+          if (purchaseStatus != null) 'lastPurchaseStatus': purchaseStatus,
+          'lastUpdated': FieldValue.serverTimestamp(),
+        });
+      } catch (e) {
+        if (kDebugMode) debugPrint('[PremiumService] renewal update failed, trying merge: $e');
+        await docRef.set({
+          'isPremium': true,
+          'premiumExpiry': Timestamp.fromDate(expiry),
+          'premiumExpiryNotified': false,
+          'planType': 'premium',
+          'subscriptionPlan': 'pro',
+          'premiumProductId': productId,
+          if (purchaseToken != null && purchaseToken.trim().isNotEmpty) ...{
+            'lastProcessedPurchaseToken': purchaseToken.trim(),
+            'subscriptionPurchaseToken': purchaseToken.trim(),
+          },
+          if (purchaseTimeMillis != null) 'lastProcessedPurchaseTime': purchaseTimeMillis,
+          if (purchaseStatus != null) 'lastPurchaseStatus': purchaseStatus,
+          'lastUpdated': FieldValue.serverTimestamp(),
+        }, SetOptions(merge: true));
+      }
     } else {
       final docData = doc.data();
       final data = (doc.exists && docData != null) ? docData : <String, dynamic>{};
       final hadTrial = data['trialStart'] != null;
       final updates = <String, dynamic>{
         'isPremium': true,
+        'planType': 'premium',
+        'subscriptionPlan': 'pro',
         'premiumPlan': 'pro',
         'premiumDuration': durationKey,
         'premiumProductId': productId,
+        'iapProductId': productId,
+        'premiumStart': FieldValue.serverTimestamp(),
         'premiumStartDate': Timestamp.fromDate(now),
         'premiumExpiry': Timestamp.fromDate(expiry),
         'isTrialActive': false,
         'trialExpired': false,
         'premiumExpiryNotified': false,
+        if (purchaseToken != null && purchaseToken.trim().isNotEmpty) ...{
+          'lastProcessedPurchaseToken': purchaseToken.trim(),
+          'subscriptionPurchaseToken': purchaseToken.trim(),
+        },
+        if (purchaseTimeMillis != null) 'lastProcessedPurchaseTime': purchaseTimeMillis,
+        if (purchaseStatus != null) 'lastPurchaseStatus': purchaseStatus,
         'lastUpdated': FieldValue.serverTimestamp(),
       };
       if (hadTrial) updates['convertedFromTrial'] = true;
-      await docRef.update(updates);
+      try {
+        await docRef.update(updates);
+      } catch (e) {
+        if (kDebugMode) debugPrint('[PremiumService] update failed (missing doc?), merge set: $e');
+        await docRef.set(updates, SetOptions(merge: true));
+      }
       AnalyticsEventService().logPremiumActivated(durationKey);
     }
 
-    final notificationService = NotificationService();
-    await notificationService.cancelTrialExpiryWarning();
-    await notificationService.schedulePremiumExpiryWarning(expiry);
-    await notificationService.sendPremiumActivatedNotification(uid, expiry);
-    if (!isRenewal) {
-      await notificationService.sendSubscriptionSuccessNotification('pro');
+    try {
+      final notificationService = NotificationService();
+      await notificationService.cancelTrialExpiryWarning();
+      await notificationService.schedulePremiumExpiryWarning(expiry);
+      await notificationService.sendPremiumActivatedNotification(uid, expiry);
+      if (!isRenewal) {
+        await notificationService.sendSubscriptionSuccessNotification('pro');
+      }
+    } catch (e) {
+      if (kDebugMode) debugPrint('[PremiumService] activatePremiumByProductId notifications: $e');
     }
     if (kDebugMode) debugPrint(
-        '[PremiumService] activatePremiumByProductId: productId=$productId days=$days expiry=$expiry isRenewal=$isRenewal');
+        '[PremiumService] activatePremiumByProductId: productId=$productId status=${purchaseStatus ?? "unknown"} '
+        'expiryBefore=$previousExpiry expiryAfter=$expiry isRenewal=$isRenewal '
+        'token=${purchaseToken?.isNotEmpty == true ? "present" : "empty"} time=$purchaseTimeMillis');
   }
 
   /// Called after Firestore is updated by billing. Schedules "Premium Ending Soon" and sends success notification.
@@ -554,6 +818,8 @@ class PremiumService {
       final hadTrial = doc.exists && doc.data()?['trialStart'] != null;
       final updates = <String, dynamic>{
         'isPremium': true,
+        'planType': 'premium',
+        'subscriptionPlan': 'pro',
         'premiumPlan': 'pro',
         'premiumDuration': duration,
         'premiumExpiry': Timestamp.fromDate(expiry),
@@ -584,9 +850,11 @@ class PremiumService {
     await initializeTrial(uid);
   }
 
-  /// Submits purchase to Firestore for server verification. Writes subscription payload with verified=false.
-  /// Backend should validate purchaseToken and set subscription.verified = true (and isPremium/premiumExpiry).
-  /// [markVerifiedAndActivate] true = MVP client-side unlock; false = production (unlock only after backend verification).
+  /// Submits purchase receipt to Firestore for optional server verification (Google Play Developer API).
+  /// The nested `subscription` map keeps `purchaseToken` for a future Cloud Function that calls
+  /// Google Play Developer API — then set `subscription.verified` to true from the server only.
+  /// Client unlock uses `activatePremiumByProductId` after this (Play `purchased`/`restored` only).
+  /// [markVerifiedAndActivate] true = also run [activatePremiumForDuration] (legacy path).
   Future<void> submitPurchaseToFirestore({
     required String uid,
     required String productId,
@@ -609,9 +877,15 @@ class PremiumService {
           'verified': markVerifiedAndActivate,
           'updatedAt': Timestamp.fromDate(now),
         },
+        if (purchaseToken.trim().isNotEmpty) 'subscriptionPurchaseToken': purchaseToken.trim(),
         if (markVerifiedAndActivate) 'premiumVerified': true,
       };
       await _firestore.collection('users').doc(uid).set(updates, SetOptions(merge: true));
+      if (kDebugMode) {
+        debugPrint(
+          '[PremiumService] submitPurchaseToFirestore: uid=$uid productId=$productId verified=$markVerifiedAndActivate',
+        );
+      }
       if (markVerifiedAndActivate && duration != null) {
         await activatePremiumForDuration(uid, duration, purchaseToken: purchaseToken);
       }

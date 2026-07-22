@@ -1,11 +1,34 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
 import '../services/access_control_service.dart';
+import '../services/ad_service.dart';
 import '../services/ai_usage_control_service.dart';
 import '../utils/ai_access_exception.dart';
 import '../utils/premium_guard.dart';
 import '../services/analytics_service.dart';
+import '../utils/review_helper.dart';
 import '../widgets/upgrade_dialog.dart';
+
+// Counts generations this session so we don't show an interstitial after EVERY
+// one (too aggressive → churn). Show one every 3rd generation instead.
+int _aiGenCounter = 0;
+
+/// After successful AI generation: interstitial for non-premium (trial + free)
+/// every 3rd generation, then — only when we did NOT just show an ad (avoids a
+/// double popup) — ask for a Play Store rating at this happy moment.
+Future<void> _showInterstitialAfterAi(String userId) async {
+  final adService = AdService();
+  _aiGenCounter++;
+  var adShown = false;
+  if (await adService.shouldShowAdsAsync(userId) && _aiGenCounter % 3 == 0) {
+    await adService.showInterstitialAd();
+    adService.loadInterstitialAd();
+    adShown = true;
+  }
+  if (!adShown) {
+    await ReviewHelper.onAiSuccess();
+  }
+}
 
 /// Backend is source of truth: call /check-ai-access, then run AI or show paywall.
 /// On DAILY_LIMIT_REACHED from API: stop retry, show paywall, log event.
@@ -28,7 +51,9 @@ Future<T?> runWithBackendAiGuard<T>(
   final state = await svc.refresh(force: true);
   // Trial and premium: unlimited — never show upgrade dialog
   if (state.planType == 'trial' || state.planType == 'premium') {
-    return await onGenerate();
+    final result = await onGenerate();
+    if (result != null) await _showInterstitialAfterAi(user.uid);
+    return result;
   }
   // Free only: show upgrade dialog only when limit reached
   if (state.planType == 'free' && state.isLimitReached) {
@@ -41,7 +66,9 @@ Future<T?> runWithBackendAiGuard<T>(
     return null;
   }
   try {
-    return await onGenerate();
+    final result = await onGenerate();
+    if (result != null) await _showInterstitialAfterAi(user.uid);
+    return result;
   } on DailyLimitReachedException catch (e) {
     AnalyticsService.logUpgradeDialogShown(source: 'daily_limit_reached_api');
     UpgradeDialog.show(
@@ -75,8 +102,8 @@ Future<int?> getRemainingAiCreditsBackend({AiUsageControlService? service}) asyn
 /// Use this pattern in any screen that triggers AI generation.
 ///
 /// 1. User taps "Generate" → call [runWithAiGuard].
-/// 2. If trial/premium → [onGenerate] runs, no ads (trial/premium).
-/// 3. If free and under 2/day → [onGenerate] runs, then interstitial may show.
+/// 2. If trial/premium → [onGenerate] runs; interstitial after success for non-premium only.
+/// 3. If free and under 2/day → [onGenerate] runs, then interstitial for non-premium.
 /// 4. If free and 2/day reached → upgrade dialog shown, [onGenerate] not called.
 Future<void> runWithAiGuard(
   BuildContext context, {

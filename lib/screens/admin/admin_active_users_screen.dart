@@ -128,7 +128,8 @@ class _AdminActiveUsersScreenState extends State<AdminActiveUsersScreen> {
                               return Card(
                                 margin: const EdgeInsets.only(bottom: 8),
                                 child: ListTile(
-                                  title: Text(u.email),
+                                  leading: const Icon(Icons.email_outlined, color: Color(0xFF7B2CBF)),
+                                  title: Text(u.identity),
                                   subtitle: Text(
                                     '${u.uid}\nPlan: ${u.plan} • Last active: ${u.lastActiveAt != null ? DateFormat.yMd().add_Hm().format(u.lastActiveAt!) : "—"}\nAI today: ${u.aiUsesToday} • Total: ${u.aiUsesTotal}',
                                     style: const TextStyle(fontSize: 12),

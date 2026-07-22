@@ -1,56 +1,127 @@
-/// Placeholder service for publishing content to Instagram Business.
-/// Isolated from rest of app. Use only for automation flows.
-///
-/// TODO: Insert Facebook App ID, Client Token, App Secret; wire Instagram Graph API (Content Publishing).
-/// TODO: Use InstagramAuthService.getAccessToken() for authenticated requests.
+import 'dart:convert';
+import 'dart:io';
+import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_storage/firebase_storage.dart';
+import 'package:http/http.dart' as http;
+import 'api_service.dart';
+
+/// Publishing service backed by backend Instagram routes.
 
 class InstagramPublishService {
   InstagramPublishService._();
   static final InstagramPublishService _instance = InstagramPublishService._();
   static InstagramPublishService get instance => _instance;
 
-  /// Publish a single photo to Instagram Business.
-  /// TODO: Call Graph API: create container with image_url then publish with creation_id.
   Future<PublishResult> publishPhoto({
     required String imagePath,
     String? caption,
   }) async {
-    await Future.delayed(const Duration(milliseconds: 800));
-    return PublishResult(
-      success: true,
-      message: 'Mock: photo publish (replace with real API)',
-      mediaId: 'mock_media_${DateTime.now().millisecondsSinceEpoch}',
+    return _publishMedia(
+      mediaPath: imagePath,
+      isReel: false,
+      caption: caption,
     );
   }
 
-  /// Publish a reel (video) to Instagram.
-  /// TODO: Call Graph API: create video container then publish (reel).
   Future<PublishResult> publishReel({
     required String videoPath,
     String? caption,
     String? coverUrl,
   }) async {
-    await Future.delayed(const Duration(milliseconds: 800));
-    return PublishResult(
-      success: true,
-      message: 'Mock: reel publish (replace with real API)',
-      mediaId: 'mock_reel_${DateTime.now().millisecondsSinceEpoch}',
+    return _publishMedia(
+      mediaPath: videoPath,
+      isReel: true,
+      caption: caption,
     );
   }
 
-  /// Schedule a post for later. Local mock only.
-  /// TODO: Either use Instagram Graph API scheduling (if available) or backend cron + publish at scheduled time.
+  Future<PublishResult> _publishMedia({
+    required String mediaPath,
+    required bool isReel,
+    String? caption,
+  }) async {
+    try {
+      final uid = FirebaseAuth.instance.currentUser?.uid;
+      if (uid == null || uid.isEmpty) {
+        return PublishResult(success: false, message: 'Please sign in first.');
+      }
+      final file = File(mediaPath);
+      if (!await file.exists()) {
+        return PublishResult(success: false, message: 'Media file not found.');
+      }
+
+      final ext = mediaPath.split('.').last;
+      final typeDir = isReel ? 'reel' : 'photo';
+      final storageRef = FirebaseStorage.instance
+          .ref()
+          .child('instagram_publish')
+          .child(uid)
+          .child('${DateTime.now().millisecondsSinceEpoch}.$ext');
+      await storageRef.putFile(file);
+      final mediaUrl = await storageRef.getDownloadURL();
+
+      final createRes = await http.post(
+        Uri.parse('${ApiService.baseUrl}/instagram/media'),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-uid': uid,
+        },
+        body: jsonEncode({
+          ...(isReel ? {'videoUrl': mediaUrl} : {'imageUrl': mediaUrl}),
+          'caption': caption ?? '',
+          'isReel': isReel,
+          'mediaType': typeDir,
+        }),
+      );
+      final createBody = jsonDecode(createRes.body) as Map<String, dynamic>;
+      if (createRes.statusCode >= 400 || createBody['success'] != true) {
+        return PublishResult(
+          success: false,
+          message: createBody['error']?.toString() ?? 'Failed to create media',
+        );
+      }
+
+      final creationId = createBody['creationId']?.toString() ?? '';
+      if (creationId.isEmpty) {
+        return PublishResult(success: false, message: 'Missing creation id');
+      }
+
+      final publishRes = await http.post(
+        Uri.parse('${ApiService.baseUrl}/instagram/media/publish'),
+        headers: {
+          'Content-Type': 'application/json',
+          'x-user-uid': uid,
+        },
+        body: jsonEncode({'creationId': creationId}),
+      );
+      final publishBody = jsonDecode(publishRes.body) as Map<String, dynamic>;
+      if (publishRes.statusCode >= 400 || publishBody['success'] != true) {
+        return PublishResult(
+          success: false,
+          message: publishBody['error']?.toString() ?? 'Failed to publish media',
+        );
+      }
+
+      return PublishResult(
+        success: true,
+        message: isReel ? 'Reel published successfully' : 'Photo published successfully',
+        mediaId: publishBody['mediaId']?.toString(),
+      );
+    } catch (e) {
+      return PublishResult(success: false, message: e.toString().replaceFirst('Exception: ', ''));
+    }
+  }
+
   Future<ScheduleResult> schedulePost({
     required DateTime scheduledAt,
     required String caption,
     String? imagePath,
     String? videoPath,
   }) async {
-    await Future.delayed(const Duration(milliseconds: 400));
     return ScheduleResult(
-      success: true,
-      message: 'Mock: post scheduled locally (replace with real scheduling)',
-      scheduleId: 'mock_schedule_${scheduledAt.millisecondsSinceEpoch}',
+      success: false,
+      message: 'Use Schedule flow for timed posting.',
+      scheduleId: null,
     );
   }
 }

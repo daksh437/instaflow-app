@@ -22,6 +22,33 @@ class StoryIdeasScreen extends StatelessWidget {
       icon: Icons.auto_stories_rounded,
       onGenerate: _generateStoryIdea,
       serviceType: 'story_ideas',
+      analyticsToolId: 'story_ideas',
+      emptyFieldSnackText: 'Enter a topic or tap a quick idea below.',
+      generatingButtonLabel: 'Generating story ideas…',
+      progressiveLoadingMessages: const [
+        'Understanding your topic…',
+        'Brainstorming story angles…',
+        'Polishing ideas for Stories…',
+      ],
+      quickIdeas: const [
+        AiToolQuickIdea(
+          label: 'BTS',
+          text: 'Behind the scenes: how we pack orders — casual, phone camera vibe',
+        ),
+        AiToolQuickIdea(
+          label: 'Poll',
+          text: 'Coffee or chai? Quick poll for my community — fun and light',
+        ),
+        AiToolQuickIdea(
+          label: 'Teaser',
+          text: 'Teaser for tomorrow’s drop — mystery + countdown sticker energy',
+        ),
+        AiToolQuickIdea(
+          label: 'Tip',
+          text: 'One tip that doubled my engagement — educational 3-slide story',
+        ),
+      ],
+      prominentCopy: true,
     );
   }
 }

@@ -130,7 +130,7 @@ class _AdminRefundedScreenState extends State<AdminRefundedScreen> {
                                 child: ListTile(
                                   title: Row(
                                     children: [
-                                      Expanded(child: Text(u.email)),
+                                      Expanded(child: Text(u.emailDisplay)),
                                       Container(
                                         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
                                         decoration: BoxDecoration(

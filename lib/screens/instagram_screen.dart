@@ -1,6 +1,5 @@
 import 'package:flutter/material.dart';
 import 'package:firebase_auth/firebase_auth.dart';
-import 'package:url_launcher/url_launcher.dart';
 import '../services/instagram_service.dart';
 
 class InstagramScreen extends StatefulWidget {
@@ -25,12 +24,16 @@ class _InstagramScreenState extends State<InstagramScreen> {
   Future<void> _checkConnection() async {
     final user = FirebaseAuth.instance.currentUser;
     if (user == null) return;
-
-    // Check if Instagram is already connected
-    // In production, check Firestore for access token
-    setState(() {
-      _isConnected = false; // Default to false for demo
-    });
+    final connected = await _instagramService.isLoggedIn();
+    if (!mounted) return;
+    setState(() => _isConnected = connected);
+    if (connected) {
+      try {
+        final profile = await _instagramService.getUserProfile(user.uid);
+        if (!mounted) return;
+        setState(() => _profileData = profile);
+      } catch (_) {}
+    }
   }
 
   Future<void> _connectInstagram() async {
@@ -40,47 +43,12 @@ class _InstagramScreenState extends State<InstagramScreen> {
     setState(() => _isConnecting = true);
 
     try {
-      // Check if user already has an Instagram account connected
-      final hasExisting = await _instagramService.hasExistingInstagramAccount(user.uid);
-      if (hasExisting) {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Only one Instagram account can be linked. Please log out the previous account to continue.'),
-            backgroundColor: Colors.orange,
-            duration: Duration(seconds: 4),
-          ),
-        );
-        setState(() => _isConnecting = false);
-        return;
-      }
-
-      // Instagram OAuth Flow
-      // Step 1: Redirect to Instagram OAuth URL
-      // In production, use actual Instagram App ID and redirect URI
-      const oauthUrl = 'https://api.instagram.com/oauth/authorize?'
-          'client_id=YOUR_CLIENT_ID&'
-          'redirect_uri=YOUR_REDIRECT_URI&'
-          'scope=user_profile,user_media&'
-          'response_type=code';
-
-      final uri = Uri.parse(oauthUrl);
-      if (await canLaunchUrl(uri)) {
-        await launchUrl(uri, mode: LaunchMode.externalApplication);
-      }
-
-      // In production, handle the OAuth callback and exchange code for token
-      // For now, simulate connection
-      await Future.delayed(const Duration(seconds: 2));
-
-      // Use the new connectInstagram method which checks for existing accounts
-      final result = await _instagramService.connectInstagram(user.uid, 'mock_token');
+      final result = await _instagramService.connectInstagram(user.uid);
       
       if (!mounted) return;
       
       if (result['success'] == true) {
-        // Simulate fetching profile
-        final profile = await _instagramService.getUserProfile('mock_token');
+        final profile = await _instagramService.getUserProfile(user.uid);
         
         setState(() {
           _isConnected = true;
@@ -118,10 +86,7 @@ class _InstagramScreenState extends State<InstagramScreen> {
   }
 
   Future<void> _disconnectInstagram() async {
-    final user = FirebaseAuth.instance.currentUser;
-    if (user == null) return;
-
-    // In production, remove access token from Firestore
+    await _instagramService.logout();
     setState(() {
       _isConnected = false;
       _profileData = null;
@@ -162,8 +127,15 @@ class _InstagramScreenState extends State<InstagramScreen> {
               style: TextStyle(color: Colors.grey),
             ),
             const SizedBox(height: 32),
+            OutlinedButton.icon(
+              onPressed: () => Navigator.pushNamed(context, '/schedule-post'),
+              icon: const Icon(Icons.schedule_send_outlined),
+              label: const Text('Schedule Post'),
+            ),
+            const SizedBox(height: 12),
 
-            if (_isConnected && _profileData != null) ...[
+            if (_isConnected) ...[
+              if (_profileData case final Map<String, dynamic> pd)
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(16),
@@ -176,7 +148,7 @@ class _InstagramScreenState extends State<InstagramScreen> {
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        _profileData!['username'] ?? 'Instagram User',
+                        '${pd['username'] ?? 'Instagram User'}',
                         style: const TextStyle(
                           fontSize: 20,
                           fontWeight: FontWeight.bold,
@@ -184,7 +156,7 @@ class _InstagramScreenState extends State<InstagramScreen> {
                       ),
                       const SizedBox(height: 8),
                       Text(
-                        'Account Type: ${_profileData!['account_type'] ?? 'PERSONAL'}',
+                        'Account Type: ${pd['account_type'] ?? 'PERSONAL'}',
                         style: const TextStyle(color: Colors.grey),
                       ),
                     ],

@@ -2,7 +2,7 @@ name: insta_flow
 description: "Insta Flow - Smart Social Announcer App powered by AI."
 publish_to: 'none'
 
-version: 1.0.2+12
+version: 1.0.23+35
 
 
 environment:
@@ -52,6 +52,10 @@ dependencies:
   # 🔗 URL Launcher
   url_launcher: ^6.3.2
 
+  # 📤 Share sheet
+  share_plus: ^10.1.4
+  in_app_review: ^2.0.10
+
   # 📅 Date/Time Picker
   intl: ^0.19.0
 
@@ -62,15 +66,12 @@ dependencies:
   shared_preferences: ^2.3.2
   flutter_secure_storage: ^9.2.2
 
-  # 📘 Facebook Login (Instagram Business)
-  flutter_facebook_auth: ^7.0.6
-
   # 📊 Charts
   fl_chart: ^0.69.0
 
   # 💳 Google Play Billing
-  in_app_purchase: ^3.1.11
-  in_app_purchase_android: ^0.3.6+3
+  in_app_purchase: ^3.3.0
+  in_app_purchase_android: ^0.5.2
 
   # 📱 Device info for binding
   device_info_plus: ^11.1.0
@@ -80,8 +81,6 @@ dependencies:
 
   # 🕐 Timezone
   timezone: ^0.9.4
-  webview_flutter: ^4.13.1
-  webview_flutter_android: ^4.10.1
 
   # 📢 Google Mobile Ads
   google_mobile_ads: ^5.1.0
@@ -95,6 +94,14 @@ dependencies:
   # 🔊 AI Voice (ElevenLabs + playback)
   just_audio: ^0.9.40
   path_provider: ^2.1.4
+  speech_to_text: ^7.3.0
+  video_player: ^2.10.1
+  photo_view: ^0.15.0
+  crop_your_image: ^2.0.0
+  file_picker: ^11.0.2
+  reorderables: ^0.6.0
+  path: ^1.9.1
+  photo_manager: ^3.9.0
 
   # 📦 App version for force-update check
   
